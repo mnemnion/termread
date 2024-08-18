@@ -48,7 +48,7 @@ const assert = std.debug.assert;
 /// This is a place for enduring differences of opinion in dialect, not
 /// an all-purpose bugfix bucket.
 pub const Quirks = packed struct(u8) {
-    /// Terminal sends 0x08 for <BS>, not 0x7f
+    /// Terminal sends 0x08 for <BS>, 0x7f for <C-BS> / <Del>
     backspace_as_delete: bool = false,
     /// Reserved for other quirks
     reserved: u7 = 0,
@@ -77,6 +77,40 @@ pub const InfoKind = enum {
     pixel_size,
     cursor_style,
     // There's a lot of these...
+};
+
+/// Type of mouse press reported.
+pub const MousePress = enum {
+    left,
+    middle,
+    right,
+    release,
+    wheel_up,
+    wheel_down,
+    // Weirdo XTerm stuff
+    wheel_left,
+    wheel_right,
+    button_8,
+    button_9,
+    button_10,
+    button_11,
+    none,
+};
+
+/// Modifier held during mouse report event.
+pub const MouseModifier = enum(u2) {
+    none,
+    shift,
+    meta,
+    ctrl,
+};
+
+/// A report from the terminal regarding the mouse.
+pub const MouseReport = struct {
+    button: MousePress,
+    mod: MouseModifier,
+    col: u16,
+    line: u16,
 };
 
 /// Type of key action.
@@ -116,7 +150,7 @@ pub const KeyTag = enum(u4) {
     Insert,
     F,
     Char,
-    KpKey,
+    KeyPad,
     Null,
     Esc,
     CapsLock,
@@ -130,6 +164,7 @@ pub const KeyTag = enum(u4) {
     Modifier,
 };
 
+/// Represents a key press event.
 pub const Key = union(KeyTag) {
     Backspace,
     Enter,
@@ -147,7 +182,7 @@ pub const Key = union(KeyTag) {
     Insert,
     F: u6,
     Char: u21,
-    KpKey: KeyPad,
+    KeyPad: KeyPadKey,
     Null,
     Esc,
     CapsLock,
@@ -160,6 +195,7 @@ pub const Key = union(KeyTag) {
     Modifier: ModifierKey,
 };
 
+/// Known types of Media key.
 pub const MediaKey = enum(u4) {
     Play,
     Pause,
@@ -176,6 +212,7 @@ pub const MediaKey = enum(u4) {
     MuteVolume,
 };
 
+/// Known types of Modifier key.
 pub const ModifierKey = enum(u4) {
     LeftShift,
     LeftControl,
@@ -193,10 +230,14 @@ pub const ModifierKey = enum(u4) {
     ISOLevel5Shift,
 };
 
-pub const KeyPad = struct {
+/// Represents a keypad character press.
+pub const KeyPadKey = struct {
     code: KeyPadCode,
 
-    pub fn value(key: KeyPad, iso_sep: bool) u21 {
+    /// Return the value of the button pressed.  Some such
+    /// values are from the Private Use Area and must be
+    /// translated into a normalized form.
+    pub fn value(key: KeyPadKey, iso_sep: bool) u21 {
         switch (key.code) {
             .KP_0 => return '0',
             .KP_1 => return '1',
