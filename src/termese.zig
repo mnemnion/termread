@@ -44,17 +44,92 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+quirks: Quirks = Quirks{},
+
+const TermRead = @This();
+
 /// Configure Termese to recognize known quirks in terminal reporting.
 /// This is a place for enduring differences of opinion in dialect, not
 /// an all-purpose bugfix bucket.
 pub const Quirks = packed struct(u8) {
-    /// Terminal sends 0x08 for <BS>, 0x7f for <C-BS> / <Del>
+    /// Terminal sends 0x08 for <BS>, 0x7f for <C-BS> / <Del>.
     backspace_as_delete: bool = false,
-    /// ISO-keyboard-specific quirks
+    /// ISO-keyboard-specific quirks.
     iso: bool = false,
-    /// Reserved for other quirks
+    /// Reserved for other quirks.
     reserved: u6 = 0,
 };
+
+pub fn read(term: TermRead, in: []const u8) Reply {
+    switch (in[0]) {
+        // NUL is legacy for Ctrl-space
+        0 => return Reply.ok(modText(Mod().Control(), ' '), in[1..]),
+        // Legacy ^X, for some values of X
+        0x01...0x07, 0x0a...0x0c, 0x0e...0x1a => |c| {
+            // All reporting is lower case
+            return Reply.ok(modText(Mod().Control(), c + 0x60), in[1..]);
+        },
+        0x08 => { // Del
+            if (term.quirks.backspace_as_delete) {
+                return Reply.ok(special(.backspace), in[1..]);
+            } else {
+                return Reply.ok(modKey(Mod().Control(), specialKey(.backspace)), in[1..]);
+            }
+        },
+        0x09 => return Reply.ok(special(.tab)),
+        0x1c => return Reply.ok(modText(Mod().Control(), '\\'), in[1..]),
+        0x1d => return Reply.ok(modText(Mod().Control(), ']'), in[1..]),
+        0x1e => return Reply.ok(modText(Mod().Control(), '~'), in[1..]),
+        0x1f => return Reply.ok(modText(Mod().Control(), '?'), in[1..]),
+        0x20 => return Reply.ok(text(' '), in[1..]),
+        0x1f => return Reply.ok(special(.backspace), in[1..]),
+        0x1b => { // The Main Event!
+            // return readEscape;
+        },
+
+        else => unreachable, // TODO: not unreachable at all...
+    }
+}
+
+//| Builders.
+
+fn text(char: u21) TermReport {
+    return TermReport{ .key = KeyReport{
+        .key = Key{
+            .char = char,
+        },
+    } };
+}
+
+fn modKey(mod: KeyMod, key: Key) TermReport {
+    return TermReport{ .key = KeyReport{
+        .key = key,
+        .mod = mod,
+    } };
+}
+
+fn modText(mod: KeyMod, char: u21) TermReport {
+    return TermReport{ .key = KeyReport{
+        .key = Key{
+            .char = char,
+        },
+        .mod = mod,
+    } };
+}
+
+fn Mod() KeyMod {
+    return KeyMod{};
+}
+
+fn special(key_type: KeyTag) TermReport {
+    return TermReport{ .key = KeyReport{
+        .key = key_type,
+    } };
+}
+
+fn specialKey(key_type: KeyTag) KeyReport {
+    return KeyReport{ .key = key_type };
+}
 
 pub const Reply = struct {
     /// The status of the read.
@@ -63,6 +138,15 @@ pub const Reply = struct {
     report: TermReport,
     /// Remainder of buffer (may be empty).
     rest: []const u8,
+
+    /// Convenience function for 'normal' replies.
+    pub fn ok(report: TermReport, rest: []const u8) Reply {
+        return Reply{
+            .status = .complete,
+            .report = report,
+            .rest = rest,
+        };
+    }
 };
 
 /// Status of a read.
@@ -101,7 +185,7 @@ pub const TermEventKind = enum(u4) {
 /// `.key`, `.info`, `.paste`, or `.mouse`.  The other three enums
 /// represent unusual situations matching the corresponding status.
 pub const TermReport = union(TermEventKind) {
-    key: Key,
+    key: KeyReport,
     info: InfoReport,
     paste: Paste,
     mouse: MouseReport,
@@ -128,6 +212,14 @@ pub const UnrecognizedReport = struct {
 
 pub const MalformedReport = struct {
     sequence: []const u8,
+};
+
+pub const KeyReport = struct {
+    mod: KeyMod = KeyMod{},
+    key: Key,
+    action: KeyAction = .press,
+    shifted: u21 = 0,
+    base_key: u21 = 0,
 };
 
 /// Category of info reported.
@@ -192,69 +284,107 @@ pub const KeyMod = packed struct(u8) {
     meta: bool = false,
     capslock: bool = false,
     numlock: bool = false,
+
+    pub fn Shift(m: *KeyMod) KeyMod {
+        m.shift = true;
+        return m;
+    }
+
+    pub fn Alt(m: *KeyMod) KeyMod {
+        m.alt = true;
+    }
+
+    pub fn Control(m: *KeyMod) KeyMod {
+        m.control = true;
+        return m;
+    }
+
+    pub fn Super(m: *KeyMod) KeyMod {
+        m.super = true;
+        return m;
+    }
+
+    pub fn Hyper(m: *KeyMod) KeyMod {
+        m.super = true;
+        return m;
+    }
+
+    pub fn Meta(m: *KeyMod) KeyMod {
+        m.meta = true;
+        return m;
+    }
+
+    pub fn Capslock(m: *KeyMod) KeyMod {
+        m.capslock = true;
+        return m;
+    }
+
+    pub fn Numlock(m: *KeyMod) KeyMod {
+        m.numlock = true;
+        return m;
+    }
 };
 
 /// All possible Key types.
 pub const KeyTag = enum(u4) {
-    Backspace,
-    Enter,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Tab,
-    BackTab,
-    Delete,
-    Insert,
-    F,
-    Char,
-    KeyPad,
-    Null,
-    Esc,
-    CapsLock,
-    ScrollLock,
-    NumLock,
-    PrintScreen,
-    Pause,
-    Menu,
-    KeypadBegin,
-    Media,
-    Modifier,
+    backspace,
+    enter,
+    left,
+    right,
+    up,
+    down,
+    home,
+    end,
+    page_up,
+    page_down,
+    tab,
+    back_tab,
+    delete,
+    insert,
+    f,
+    char,
+    keypad,
+    null,
+    esc,
+    caps_lock,
+    scroll_lock,
+    num_lock,
+    print_screen,
+    pause,
+    menu,
+    media,
+    modifier,
 };
 
 /// Represents a key press event.
 pub const Key = union(KeyTag) {
-    Backspace,
-    Enter,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Tab,
-    BackTab,
-    Delete,
-    Insert,
-    F: u6,
-    Char: u21,
-    KeyPad: KeyPadKey,
-    Null,
-    Esc,
-    CapsLock,
-    ScrollLock,
-    NumLock,
-    PrintScreen,
-    Pause,
-    Menu,
-    Media: MediaKey,
-    Modifier: ModifierKey,
+    backspace,
+    enter,
+    left,
+    right,
+    up,
+    down,
+    home,
+    end,
+    page_up,
+    page_down,
+    tab,
+    back_tab,
+    delete,
+    insert,
+    f: u6,
+    char: u21,
+    keypad: KeyPadKey,
+    null,
+    esc,
+    caps_lock,
+    scroll_lock,
+    num_lock,
+    print_screen,
+    pause,
+    menu,
+    media: MediaKey,
+    modifier: ModifierKey,
 };
 
 /// Known types of Media key.
