@@ -60,35 +60,119 @@ pub const Quirks = packed struct(u8) {
     reserved: u6 = 0,
 };
 
+/// Read one sequence from `in` buffer.  Returns a `Reply`, containing
+/// the status of the read, the report, and the remainder of the in
+/// buffer.
 pub fn read(term: TermRead, in: []const u8) Reply {
     switch (in[0]) {
-        // NUL is legacy for Ctrl-space
-        0 => return Reply.ok(modText(Mod().Control(), ' '), in[1..]),
-        // Legacy ^X, for some values of X
+        // NUL is legacy for Ctrl-space.
+        0 => return Reply.ok(modText(mod().Control(), ' '), in[1..]),
+        // Legacy ^X, for some values of X.
         0x01...0x07, 0x0a...0x0c, 0x0e...0x1a => |c| {
-            // All reporting is lower case
-            return Reply.ok(modText(Mod().Control(), c + 0x60), in[1..]);
+            // All reporting is lower case.
+            return Reply.ok(modText(mod().Control(), c + 0x60), in[1..]);
         },
-        0x08 => { // Del
+        0x08 => { // <Del>
             if (term.quirks.backspace_as_delete) {
                 return Reply.ok(special(.backspace), in[1..]);
             } else {
-                return Reply.ok(modKey(Mod().Control(), specialKey(.backspace)), in[1..]);
+                return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
             }
         },
         0x09 => return Reply.ok(special(.tab)),
-        0x1c => return Reply.ok(modText(Mod().Control(), '\\'), in[1..]),
-        0x1d => return Reply.ok(modText(Mod().Control(), ']'), in[1..]),
-        0x1e => return Reply.ok(modText(Mod().Control(), '~'), in[1..]),
-        0x1f => return Reply.ok(modText(Mod().Control(), '?'), in[1..]),
+        // https://vt100.net/docs/vt100-ug/chapter3.html#T3-5
+        0x1c => return Reply.ok(modText(mod().Control(), '\\'), in[1..]),
+        0x1d => return Reply.ok(modText(mod().Control(), ']'), in[1..]),
+        0x1e => return Reply.ok(modText(mod().Control(), '~'), in[1..]),
+        0x1f => return Reply.ok(modText(mod().Control(), '?'), in[1..]),
         0x20 => return Reply.ok(text(' '), in[1..]),
-        0x1f => return Reply.ok(special(.backspace), in[1..]),
+        0x1f => { // <BS>
+            if (term.quirks.backspace_as_delete) {
+                return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
+            } else {
+                return Reply.ok(special(.backspace), in[1..]);
+            }
+        },
         0x1b => { // The Main Event!
-            // return readEscape;
+            return term.parseEsc(in);
         },
 
         else => unreachable, // TODO: not unreachable at all...
     }
+}
+
+fn parseEsc(term: TermRead, in: []const u8) Reply {
+    if (in.len == 1) {
+        return Reply.ok(special(.esc), in);
+    }
+    switch (in[1]) {
+        'O' => return term.parseSS3(in),
+        '[' => return term.parseCSI(in),
+        0x1b => { // Legacy Alt-Esc
+            return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
+        },
+        else => { // Lead alt probably.
+            const reply = term.read(in[1..]);
+            if (reply.status == .complete) {
+                switch (reply.report) {
+                    .key => |k| {
+                        // Lead-alt is legacy, so we only care about modifier,
+                        // and key:
+                        var kmod = k.mod;
+                        return Reply.ok(modKey(kmod.Alt(), k.key));
+                    },
+                    .paste,
+                    .mouse,
+                    .info,
+                    .more,
+                    => {
+                        // Plausible interpretation: Esc followed by something
+                        // else.
+                        return Reply.ok(special(.esc), in[2..]);
+                    },
+                    .unrecognized, .malformed => return reply,
+                }
+            }
+        },
+    }
+}
+
+fn parseSS3(term: TermRead, in: []const u8) Reply {
+    assert(in[0] == 0x1b);
+    assert(in[1] == 'O');
+    // If that's all we got, there may well be more coming:
+    if (in.len == 2) return moreNeeded(false, in);
+
+    switch (in[2]) {
+        'A' => return Reply.ok(special(.up), in[2..]),
+        'B' => return Reply.ok(special(.down), in[2..]),
+        'C' => return Reply.ok(special(.right), in[2..]),
+        'D' => return Reply.ok(special(.left), in[2..]),
+        'H' => return Reply.ok(special(.home), in[2..]),
+        'F' => return Reply.ok(special(.end), in[2..]),
+        'P'...'S' => |fk| {
+            return Reply.ok(fKey(fk - 0x4f), in[2..]);
+        },
+        else => { // Valid esc code, don't know what
+            return notRecognized(in[0..2], in[2..]);
+        },
+    }
+    _ = term;
+}
+
+fn parseCSI(term: TermRead, in: []const u8) Reply {
+    _ = term;
+    _ = in;
+}
+
+fn parseText(term: TermRead, in: []const u8) Reply {
+    const b = std.unicode.utf8ByteSequenceLength(in[0]) catch {
+        return malformedRead(1, in);
+    };
+    const code = std.unicode.utf8decode(in[0..b]) catch {
+        return malformedRead(b, in);
+    };
+    return Reply.ok(text(code), term[b..]);
 }
 
 //| Builders.
@@ -101,23 +185,23 @@ fn text(char: u21) TermReport {
     } };
 }
 
-fn modKey(mod: KeyMod, key: Key) TermReport {
+fn modKey(modifier: KeyMod, key: Key) TermReport {
     return TermReport{ .key = KeyReport{
         .key = key,
-        .mod = mod,
+        .mod = modifier,
     } };
 }
 
-fn modText(mod: KeyMod, char: u21) TermReport {
+fn modText(modifier: KeyMod, char: u21) TermReport {
     return TermReport{ .key = KeyReport{
         .key = Key{
             .char = char,
         },
-        .mod = mod,
+        .mod = modifier,
     } };
 }
 
-fn Mod() KeyMod {
+fn mod() KeyMod {
     return KeyMod{};
 }
 
@@ -129,6 +213,42 @@ fn special(key_type: KeyTag) TermReport {
 
 fn specialKey(key_type: KeyTag) KeyReport {
     return KeyReport{ .key = key_type };
+}
+
+fn fKey(num: u21) TermReport {
+    return TermReport{ .key = KeyReport{
+        .key = Key{ .f = @intCast(num) },
+    } };
+}
+
+fn notRecognized(in: []const u8, rest: []const u8) Reply {
+    return Reply{
+        .status = .unrecognized,
+        .report = TermReport{
+            .{ .unrecognized = .{ .sequence = in } },
+        },
+        .rest = rest,
+    };
+}
+
+fn moreNeeded(is_paste: bool, rest: []const u8) Reply {
+    return Reply{
+        .status = .more,
+        .report = MoreReport{
+            .is_paste = is_paste,
+        },
+        .rest = rest,
+    };
+}
+
+fn malformedRead(idx: usize, in: []const u8) Reply {
+    return Reply{
+        .status = .malformed,
+        .report = MalformedReport{
+            .sequence = in[0..idx],
+        },
+        .rest = in[idx..],
+    };
 }
 
 pub const Reply = struct {
