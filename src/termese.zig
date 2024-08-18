@@ -50,12 +50,35 @@ const assert = std.debug.assert;
 pub const Quirks = packed struct(u8) {
     /// Terminal sends 0x08 for <BS>, 0x7f for <C-BS> / <Del>
     backspace_as_delete: bool = false,
+    /// ISO-keyboard-specific quirks
+    iso: bool = false,
     /// Reserved for other quirks
-    reserved: u7 = 0,
+    reserved: u6 = 0,
+};
+
+pub const Reply = struct {
+    /// The status of the read.
+    status: ReadStatus,
+    /// Associated report.
+    report: TermReport,
+    /// Remainder of buffer (may be empty).
+    rest: []const u8,
+};
+
+/// Status of a read.
+pub const ReadStatus = enum(u2) {
+    /// We parsed a complete key event.
+    complete,
+    /// We were successfully parsing and require more input.
+    more,
+    /// A structurally valid, but unrecognized, sequence.
+    unrecognized,
+    /// Garbage.
+    malformed,
 };
 
 /// Basic category of a read event.
-pub const TermEventKind = enum(u3) {
+pub const TermEventKind = enum(u4) {
     /// A key event: one or several keys pressed.
     key,
     /// A reply from the terminal to some request.
@@ -64,8 +87,47 @@ pub const TermEventKind = enum(u3) {
     paste,
     /// Mouse movement.
     mouse,
-    // A garbled or otherwise invalid sequence.
+    /// More read is needed.
+    more,
+    /// Unrecognized but valid sequence.
+    unrecognized,
+    /// Malformed sequence
     malformed,
+};
+
+/// Types of reported terminal event.
+///
+/// In the event of `Reply.status == .complete`, this will be one of
+/// `.key`, `.info`, `.paste`, or `.mouse`.  The other three enums
+/// represent unusual situations matching the corresponding status.
+pub const TermReport = union(TermEventKind) {
+    key: Key,
+    info: InfoReport,
+    paste: Paste,
+    mouse: MouseReport,
+    more: MoreReport,
+    unrecognized: UnrecognizedReport,
+    malformed: MalformedReport,
+};
+
+pub const InfoReport = struct {
+    string: []const u8,
+}; // TODO: Stub
+
+pub const Paste = struct {
+    string: []const u8,
+}; // TODO: Stub (albeit a fairly complete one)
+
+pub const MoreReport = struct {
+    is_paste: bool,
+};
+
+pub const UnrecognizedReport = struct {
+    sequence: []const u8,
+};
+
+pub const MalformedReport = struct {
+    sequence: []const u8,
 };
 
 /// Category of info reported.
