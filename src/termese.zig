@@ -98,6 +98,183 @@ pub const KeyMod = packed struct(u8) {
     numlock: bool = false,
 };
 
+/// All possible Key types.
+pub const KeyTag = enum(u4) {
+    Backspace,
+    Enter,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Tab,
+    BackTab,
+    Delete,
+    Insert,
+    F,
+    Char,
+    KpKey,
+    Null,
+    Esc,
+    CapsLock,
+    ScrollLock,
+    NumLock,
+    PrintScreen,
+    Pause,
+    Menu,
+    KeypadBegin,
+    Media,
+    Modifier,
+};
+
+pub const Key = union(KeyTag) {
+    Backspace,
+    Enter,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Tab,
+    BackTab,
+    Delete,
+    Insert,
+    F: u6,
+    Char: u21,
+    KpKey: KeyPad,
+    Null,
+    Esc,
+    CapsLock,
+    ScrollLock,
+    NumLock,
+    PrintScreen,
+    Pause,
+    Menu,
+    Media: MediaKey,
+    Modifier: ModifierKey,
+};
+
+pub const MediaKey = enum(u4) {
+    Play,
+    Pause,
+    PlayPause,
+    Reverse,
+    Stop,
+    FastForward,
+    Rewind,
+    TrackNext,
+    TrackPrevious,
+    Record,
+    LowerVolume,
+    RaiseVolume,
+    MuteVolume,
+};
+
+pub const ModifierKey = enum(u4) {
+    LeftShift,
+    LeftControl,
+    LeftAlt,
+    LeftSuper,
+    LeftHyper,
+    LeftMeta,
+    RightShift,
+    RightControl,
+    RightAlt,
+    RightSuper,
+    RightHyper,
+    RightMeta,
+    ISOLevel3Shift,
+    ISOLevel5Shift,
+};
+
+pub const KeyPad = struct {
+    code: KeyPadCode,
+
+    pub fn value(key: KeyPad, iso_sep: bool) u21 {
+        switch (key.code) {
+            .KP_0 => return '0',
+            .KP_1 => return '1',
+            .KP_2 => return '2',
+            .KP_3 => return '3',
+            .KP_4 => return '4',
+            .KP_5 => return '5',
+            .KP_6 => return '6',
+            .KP_7 => return '7',
+            .KP_8 => return '8',
+            .KP_9 => return '9',
+            .KP_Decimal => {
+                if (iso_sep) {
+                    return ',';
+                } else {
+                    return '.';
+                }
+            },
+            .KP_Divide => return '/',
+            .KP_Multiply => return '*',
+            .KP_Subtract => return '-',
+            .KP_Add => return '+',
+            .KP_Enter => return '\x0d',
+            .KP_Equal => return '=',
+            .KP_Separator => {
+                if (iso_sep) {
+                    return '.';
+                } else {
+                    return ',';
+                }
+            },
+            .KP_Left => return UCS.KP_Left,
+            .KP_Right => return UCS.KP_Right,
+            .KP_Up => return UCS.KP_Up,
+            .KP_Down => return UCS.KP_Down,
+            .KP_PageUp => return UCS.KP_PageUp,
+            .KP_PageDown => return UCS.KP_PageDown,
+            .KP_Home => return UCS.KP_Home,
+            .KP_End => return UCS.KP_End,
+            .KP_Insert => return UCS.KP_Insert,
+            .KP_Delete => return UCS.KP_Delete,
+            .KP_Begin => return UCS.KP_Begin,
+        }
+    }
+};
+
+pub const KeyPadCode = enum(u5) {
+    KP_0,
+    KP_1,
+    KP_2,
+    KP_3,
+    KP_4,
+    KP_5,
+    KP_6,
+    KP_7,
+    KP_8,
+    KP_9,
+    KP_Decimal,
+    KP_Divide,
+    KP_Multiply,
+    KP_Subtract,
+    KP_Add,
+    KP_Enter,
+    KP_Equal,
+    KP_Separator,
+    KP_Left,
+    KP_Right,
+    KP_Up,
+    KP_Down,
+    KP_PageUp,
+    KP_PageDown,
+    KP_Home,
+    KP_End,
+    KP_Insert,
+    KP_Delete,
+    KP_Begin,
+};
+
 /// Namespace for Unicode key values.  Kitty-focused.
 /// These are CSI u codes, missing values in this table
 /// are handled in some other fashion.
@@ -188,6 +365,6 @@ const UCS = struct {
     pub const RightSuper = 57450;
     pub const RightHyper = 57451;
     pub const RightMeta = 57452;
-    pub const ISO_Level3Shift = 57453;
-    pub const ISO_Level5Shift = 57454;
+    pub const ISOLevel3Shift = 57453;
+    pub const ISOLevel5Shift = 57454;
 };
