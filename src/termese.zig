@@ -162,19 +162,26 @@ fn parseSS3(term: TermRead, in: []const u8) Reply {
 }
 
 fn parseCsi(term: TermRead, in: []const u8) Reply {
-    var out: usize = 0; // Set to index of error or final byte.
-    const may_b = getFinalByte(in, &out) catch {
-        return malformedRead(out, in);
-    };
-    if (may_b == null) {
+    const maybe_info = validateControlSequence(in);
+    if (maybe_info == null) {
         return moreNeeded(false, in);
     } // That checked, we can do this:
-    const b = may_b.?;
-    const rest = in[out + 1 ..];
+    const info = maybe_info.?;
+    if (!info.valid) {
+        return malformedRead(info.stop, in);
+    }
+    const rest = in[info.stop..];
+    const b = info.byte;
     // Csi-u?
-    if (b == 'u') return term.parseCsiU(in, in[2..out], rest);
+    if (b == 'u') {
+        if (!info.has_intermediates)
+            return term.parseCsiU(in, in[2..info.stop], rest)
+        else // Arguably unrecognized (private use and all),
+            //  but not for our purposes
+            return malformedRead(info.stop, in);
+    }
     // Case of no modifiers.
-    if (out == 2) {
+    if (info.stop == 3) {
         switch (b) { // Various legacy special keys
             'A' => return Reply.ok(special(.up), rest),
             'B' => return Reply.ok(special(.down), rest),
@@ -184,7 +191,7 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
             'H' => return Reply.ok(special(.home), rest),
             'F' => return Reply.ok(special(.end), rest),
             'Z' => return Reply.ok(modKey(mod().Shift(), specialKey(.tab)), rest),
-            else => return notRecognized(in[0..out], rest),
+            else => return notRecognized(in[0..info.stop], rest),
         }
     }
     if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
@@ -194,12 +201,17 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
     unreachable; // Will be..
 }
 
+const UTF_MAX = 0x10ffff;
+
 fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) Reply {
     _ = term;
-    _ = in; // Definitely going to use this one.
     // Structure: CSI handled, 'u' is known.
     // unicode-key-code[:shifted-key[:base-layout-key]][;modifiers[:event-type][;text-as-codepoints]]u
     const codepoint, var idx = parseParameter(u21, seq);
+    if (codepoint > UTF_MAX) {
+        // Overlarge codepoint
+        return malformedRead(2 + seq.len, in);
+    }
     if (idx == seq.len) {
         // Easy
         return Reply.ok(text(codepoint), rest);
@@ -208,12 +220,17 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     const has_shifted = seq[idx] == ':';
     const shifted_key: u21 = shifted: {
         if (has_shifted) {
-            if (seq[idx + 1] == ':') {
+            idx += 1;
+            if (seq[idx] == ':') {
+                // Base key but no shift
                 idx += 1;
                 break :shifted 0;
             } else {
-                const shift_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]);
-                idx += 1 + idx_delta;
+                const shift_point, const idx_delta = parseParameter(u21, seq[idx..]);
+                if (shift_point > UTF_MAX) {
+                    return malformedRead(2 + seq.len, in);
+                }
+                idx += idx_delta;
                 break :shifted shift_point;
             }
         } else {
@@ -225,6 +242,9 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
         if (has_shifted) {
             if (seq[idx] == ':') {
                 const base_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]);
+                if (base_point > UTF_MAX) {
+                    return malformedRead(2 + seq.len, in);
+                }
                 idx += 1 + idx_delta;
                 break :base base_point;
             } else {
@@ -238,9 +258,12 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     if (seq[idx] == ';') {
         idx += 1;
         if (seq[idx] != ';') {
-            var mod_value, const idx_delta = parseParameter(u8, seq[idx..]);
+            var mod_value, const idx_delta = parseParameter(u9, seq[idx..]);
             mod_value -= 1;
-            modifier = @bitCast(mod_value);
+            if (mod_value <= std.math.maxInt(u8)) {
+                const mod8: u8 = @intCast(mod_value);
+                modifier = @bitCast(mod8);
+            }
             idx += idx_delta;
         }
     }
@@ -266,7 +289,7 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     // This is unreasonable, and we will parse one (1) if we find it.
     // Tracking issue: https://github.com/kovidgoyal/kitty/issues/7749
     const associated: u21 = assoc: {
-        // TODO: if we can get a satsifactory resolution to the unlimited
+        // TODO: if we can get a satisfactory resolution to the unlimited
         // codepoints issue, I can create an AssociatedTextReport which
         // wraps a KeyReport and provides the associated text as a separate
         // buffer of some number of codepoints.  It's ok if the total size
@@ -317,6 +340,7 @@ fn parseText(term: TermRead, in: []const u8) Reply {
 
 // Parse a parameter into integer type T, returning the value and next index.
 fn parseParameter(T: type, seq: []const u8) struct { T, usize } {
+    // TODO: Throw an error here
     var i: usize = 0;
     while ('0' <= seq[i] and seq[i] <= '9') : (i += 1) {}
     if (i > 0) {
@@ -325,6 +349,19 @@ fn parseParameter(T: type, seq: []const u8) struct { T, usize } {
     } else @panic("parseParameter called on non-numeric sequence");
 }
 
+const CsiInfo = struct {
+    /// Final byte
+    byte: u8,
+    /// in[0..stop] for sequence read
+    stop: usize,
+    /// Is CSI private use string?
+    is_private_use: bool,
+    /// Has an intermediate byte?
+    has_intermediates: bool,
+    /// Valid parameter string?
+    valid: bool,
+};
+
 /// Verify the integrity of the CSI control sequence, returning the
 /// final byte. or throwing an `InvalidCSI` error if the string is
 /// not valid.  If the string is valid but no final byte is reached,
@@ -332,31 +369,45 @@ fn parseParameter(T: type, seq: []const u8) struct { T, usize } {
 /// report the index of either an error or a found final byte.
 ///
 /// References are to ECMA-48/1991.
-fn getFinalByte(in: []const u8, out: *usize) error{InvalidCSI}!?u8 {
+fn validateControlSequence(in: []const u8) ?CsiInfo {
     // §5.4.1b
     const is_private_use = 0x3c <= in[2] and in[2] <= 0x3f;
-    const hi: u8 = if (is_private_use)
-        0x3f
-    else
-        0x3b;
+    if (is_private_use) return CsiInfo{
+        .byte = 0xff,
+        .stop = 3,
+        .is_private_use = true,
+        .has_intermediates = false,
+        .valid = true, // So far as we know!
+    };
     var intermediate = false;
     for (2..in.len) |i| {
         const b = in[i];
         if (!intermediate) {
-            if (0x30 <= b and b <= hi) {
+            if (0x30 <= b and b <= 0x3b) {
                 continue;
             } else if (0x20 <= b and b <= 0x2f) {
                 intermediate = true;
+                continue;
             }
         } else { // TODO: does anything actually use > 1 intermediate byte?
             if (0x20 <= b and b <= 0x2f) continue;
         } // Final byte? §5.4d)
         if (0x40 <= b and b <= 0x7e) {
-            out.* = i;
-            return b;
+            return CsiInfo{
+                .byte = b,
+                .stop = i + 1,
+                .is_private_use = false,
+                .has_intermediates = intermediate,
+                .valid = true,
+            };
         } else {
-            out.* = i;
-            return error.InvalidCSI;
+            return CsiInfo{
+                .byte = b,
+                .stop = i + 1,
+                .is_private_use = false,
+                .has_intermediates = intermediate, // Why not?
+                .valid = false,
+            };
         }
     }
     return null;
