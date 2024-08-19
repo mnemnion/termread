@@ -97,7 +97,7 @@ pub fn read(term: TermRead, in: []const u8) Reply {
             return term.parseEsc(in);
         },
 
-        else => unreachable, // TODO: not unreachable at all...
+        else => return term.parseText(in),
     }
 }
 
@@ -167,13 +167,14 @@ fn parseCSI(term: TermRead, in: []const u8) Reply {
 }
 
 fn parseText(term: TermRead, in: []const u8) Reply {
+    _ = term;
     const b = std.unicode.utf8ByteSequenceLength(in[0]) catch {
         return malformedRead(1, in);
     };
-    const code = std.unicode.utf8decode(in[0..b]) catch {
+    const code = std.unicode.utf8Decode(in[0..b]) catch {
         return malformedRead(b, in);
     };
-    return Reply.ok(text(code), term[b..]);
+    return Reply.ok(text(code), in[b..]);
 }
 
 //| Builders.
@@ -268,8 +269,8 @@ fn moreNeeded(is_paste: bool, rest: []const u8) Reply {
 fn malformedRead(idx: usize, in: []const u8) Reply {
     return Reply{
         .status = .malformed,
-        .report = MalformedReport{
-            .sequence = in[0..idx],
+        .report = TermReport{
+            .malformed = .{ .sequence = in[0..idx] },
         },
         .rest = in[idx..],
     };
@@ -300,15 +301,15 @@ pub const Reply = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try writer.print("status: {s}\n\n", .{@tagName(reply.status)});
+        try writer.print("status: {s}\n", .{@tagName(reply.status)});
         try reply.report.format(fmt, options, writer);
-        try writer.print("rest of buffer: '{s}'\n", .{reply.rest});
+        try writer.print("rest: '{s}'\n", .{reply.rest});
     }
 };
 
 /// Status of a read.
 pub const ReadStatus = enum(u2) {
-    /// We parsed a complete key event.
+    /// We parsed a complete terminal event.
     complete,
     /// We were successfully parsing and require more input.
     more,
@@ -356,11 +357,11 @@ pub const TermReport = union(TermEventKind) {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
-        _ = options;
         switch (term_report) {
-            .key => {
-                try writer.print("key: \n", .{});
+            .key => |k| {
+                try writer.writeAll("key: ");
+                try k.format(fmt, options, writer);
+                try writer.writeAll("\n");
             },
             .info => {
                 try writer.print("info: \n", .{});
@@ -410,6 +411,59 @@ pub const KeyReport = struct {
     action: KeyAction = .press,
     shifted: u21 = 0,
     base_key: u21 = 0,
+
+    pub fn format(
+        key: KeyReport,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        const md = key.mod;
+        if (md.capslock) try writer.writeAll("[Capslock] ");
+        if (md.numlock) try writer.writeAll("[Numlock] ");
+        const is_modded = md.isModified();
+        if (is_modded) {
+            try writer.writeAll("<");
+            if (md.shift) try writer.writeAll("S-");
+            if (md.alt) try writer.writeAll("A-");
+            if (md.control) try writer.writeAll("C-");
+            if (md.super) try writer.writeAll("D-");
+            if (md.hyper) try writer.writeAll("H-");
+            if (md.meta) try writer.writeAll("M-");
+        }
+        switch (key.value) {
+            .backspace,
+            .enter,
+            .left,
+            .right,
+            .up,
+            .down,
+            .home,
+            .end,
+            .page_up,
+            .page_down,
+            .tab,
+            .back_tab,
+            .delete,
+            .esc,
+            .caps_lock,
+            .scroll_lock,
+            .num_lock,
+            .print_screen,
+            .pause,
+            .menu,
+            .insert,
+            => try writer.print("<{s}>", .{@tagName(key.value)}),
+            .f => |f| try writer.print("F{d}", .{f}),
+            .char => |c| try writer.print("{u}", .{c}),
+            .keypad => |k| try writer.print("KP_{u}", .{k.value(false)}),
+            .media => |k| try writer.print("M_{s}", .{@tagName(k)}),
+            .modifier => |k| try writer.print("<{s}>", .{@tagName(k)}),
+        }
+        if (is_modded) try writer.writeAll(">");
+    }
 };
 
 /// Category of info reported.
@@ -474,6 +528,21 @@ pub const KeyMod = packed struct(u8) {
     meta: bool = false,
     capslock: bool = false,
     numlock: bool = false,
+
+    //| Reporting Functions
+
+    /// Answer whether a modifier is set.  Doesn't count shift,
+    /// capslock, or numlock.
+    pub fn isModified(m: KeyMod) bool {
+        return m.alt or m.control or m.super or m.hyper or m.meta;
+    }
+
+    /// Answer whether a key lock (caps or num) is set.
+    pub fn isLocked(m: KeyMod) bool {
+        return m.capslock or m.numlock;
+    }
+
+    //| Fluent builder functions
 
     pub fn Shift(m: KeyMod) KeyMod {
         var m1 = m;
@@ -649,7 +718,7 @@ pub const KeyPadKey = struct {
             .KP_Multiply => return '*',
             .KP_Subtract => return '-',
             .KP_Add => return '+',
-            .KP_Enter => return '\x0d',
+            .KP_Enter => return '\x0d', // \r, not \n
             .KP_Equal => return '=',
             .KP_Separator => {
                 if (iso_sep) {
@@ -821,5 +890,5 @@ test "parsing" {
         @src(),
         \\
         ,
-    ).showFmt(term.read("\x09"));
+    ).showFmt(term.read("Q"));
 }
