@@ -172,7 +172,7 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
     const b = may_b.?;
     const rest = in[out + 1 ..];
     // Csi-u?
-    if (b == 'u') return term.parseCsiU(in[2..out], rest);
+    if (b == 'u') return term.parseCsiU(in, in[2..out], rest);
     // Case of no modifiers.
     if (out == 2) {
         switch (b) { // Various legacy special keys
@@ -183,9 +183,7 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
             'E' => return Reply.ok(keyPad(.KP_Begin), rest),
             'H' => return Reply.ok(special(.home), rest),
             'F' => return Reply.ok(special(.end), rest),
-            'P' => return Reply.ok(fKey(1), rest),
-            'Q' => return Reply.ok(fKey(2), rest),
-            'S' => return Reply.ok(fKey(4), rest),
+            'Z' => return Reply.ok(modKey(mod().Shift(), specialKey(.tab)), rest),
             else => return notRecognized(in[0..out], rest),
         }
     }
@@ -196,10 +194,110 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
     unreachable; // Will be..
 }
 
-fn parseCsiU(term: TermRead, seq: []const u8, rest: []const u8) Reply {
+fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) Reply {
     _ = term;
-    _ = seq;
-    return malformedRead(0, rest);
+    _ = in; // Definitely going to use this one.
+    // Structure: CSI handled, 'u' is known.
+    // unicode-key-code[:shifted-key[:base-layout-key]][;modifiers[:event-type][;text-as-codepoints]]u
+    const codepoint, var idx = parseParameter(u21, seq);
+    if (idx == seq.len) {
+        // Easy
+        return Reply.ok(text(codepoint), rest);
+    }
+    // Obtain shifted key, if available.
+    const has_shifted = seq[idx] == ':';
+    const shifted_key: u21 = shifted: {
+        if (has_shifted) {
+            if (seq[idx + 1] == ':') {
+                idx += 1;
+                break :shifted 0;
+            } else {
+                const shift_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]);
+                idx += 1 + idx_delta;
+                break :shifted shift_point;
+            }
+        } else {
+            break :shifted 0;
+        }
+    };
+    // Obtain base key, if available.
+    const base_key: u21 = base: {
+        if (has_shifted) {
+            if (seq[idx] == ':') {
+                const base_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]);
+                idx += 1 + idx_delta;
+                break :base base_point;
+            } else {
+                // ? assert(seq[idx] == ';') possible malformations though
+                break :base 0;
+            }
+        } else break :base 0;
+    };
+    // Modifiers?
+    var modifier = mod();
+    if (seq[idx] == ';') {
+        idx += 1;
+        if (seq[idx] != ';') {
+            var mod_value, const idx_delta = parseParameter(u8, seq[idx..]);
+            mod_value -= 1;
+            modifier = @bitCast(mod_value);
+            idx += idx_delta;
+        }
+    }
+    // TODO: if shift_key > 0, modifier.shift must be true
+
+    // Event type?
+    const event: KeyEvent = event: {
+        if (seq[idx] == ':') {
+            idx += 1;
+            const event_value, const idx_delta = parseParameter(u2, seq[idx..]);
+            idx += idx_delta;
+            switch (event_value) {
+                1 => break :event .press,
+                2 => break :event .repeat,
+                3 => break :event .release,
+                0 => unreachable, // TODO: parse failures generally, definitely here
+            }
+        } else {
+            break :event .press;
+        }
+    };
+    // The protocol allows for any number of codepoints of associated text.
+    // This is unreasonable, and we will parse one (1) if we find it.
+    // Tracking issue: https://github.com/kovidgoyal/kitty/issues/7749
+    const associated: u21 = assoc: {
+        // TODO: if we can get a satsifactory resolution to the unlimited
+        // codepoints issue, I can create an AssociatedTextReport which
+        // wraps a KeyReport and provides the associated text as a separate
+        // buffer of some number of codepoints.  It's ok if the total size
+        // of the TermReport union is a bit bloated, because they need to
+        // be unwrapped at the point of use.  It would be better if the size
+        // of KeyReports doesn't get out of hand, though.
+        if (seq[idx] == ';') {
+            idx += 1;
+            const assoc_value, const idx_delta = parseParameter(u21, seq[idx..]);
+            idx += idx_delta;
+            // Drop anything else on the floor where it belongs
+            while (seq[idx] != 'u') : (idx += 1) {}
+            break :assoc assoc_value;
+        } else {
+            break :assoc 0;
+        }
+    };
+    return Reply{
+        .status = .complete,
+        .report = TermReport{
+            .key = KeyReport{
+                .value = .{ .char = codepoint },
+                .event = event,
+                .mod = modifier,
+                .shifted = shifted_key,
+                .base_key = base_key,
+                .associated = associated,
+            },
+        },
+        .rest = rest,
+    };
 }
 
 fn parseText(term: TermRead, in: []const u8) Reply {
@@ -211,6 +309,16 @@ fn parseText(term: TermRead, in: []const u8) Reply {
         return malformedRead(b, in);
     };
     return Reply.ok(text(code), in[b..]);
+}
+
+// Parse a parameter into integer type T, returning the value and next index.
+fn parseParameter(T: type, seq: []const u8) struct { T, usize } {
+    var i: usize = 0;
+    while ('0' <= seq[i] and seq[i] <= '9') : (i += 1) {}
+    if (i > 0) {
+        const value: T = std.fmt.parseInt(T, seq[0..i], 10) catch unreachable;
+        return .{ value, i };
+    } else @panic("parseParameter called on non-numeric sequence");
 }
 
 /// Verify the integrity of the CSI control sequence, returning the
@@ -331,11 +439,11 @@ fn fKey(num: u21) TermReport {
     } };
 }
 
-fn notRecognized(in: []const u8, rest: []const u8) Reply {
+fn notRecognized(seq: []const u8, rest: []const u8) Reply {
     return Reply{
         .status = .unrecognized,
         .report = TermReport{
-            .unrecognized = .{ .sequence = in },
+            .unrecognized = .{ .sequence = seq },
         },
         .rest = rest,
     };
@@ -493,9 +601,12 @@ pub const MalformedReport = struct {
 pub const KeyReport = struct {
     mod: KeyMod = KeyMod{},
     value: Key,
-    action: KeyAction = .press,
+    event: KeyEvent = .press,
     shifted: u21 = 0,
     base_key: u21 = 0,
+    // TODO: the standard allows arbitrary numbers of codepoints here,
+    // which is insane. What do?
+    associated: u21 = 0,
 
     pub fn format(
         key: KeyReport,
@@ -596,8 +707,8 @@ pub const MouseReport = struct {
     line: u16,
 };
 
-/// Type of key action.
-pub const KeyAction = enum(u2) {
+/// Type of key event.
+pub const KeyEvent = enum(u2) {
     press = 1,
     repeat,
     release,
