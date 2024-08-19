@@ -79,14 +79,14 @@ pub fn read(term: TermRead, in: []const u8) Reply {
                 return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
             }
         },
-        0x09 => return Reply.ok(special(.tab)),
+        0x09 => return Reply.ok(special(.tab), in[1..]),
         // https://vt100.net/docs/vt100-ug/chapter3.html#T3-5
         0x1c => return Reply.ok(modText(mod().Control(), '\\'), in[1..]),
         0x1d => return Reply.ok(modText(mod().Control(), ']'), in[1..]),
         0x1e => return Reply.ok(modText(mod().Control(), '~'), in[1..]),
         0x1f => return Reply.ok(modText(mod().Control(), '?'), in[1..]),
         0x20 => return Reply.ok(text(' '), in[1..]),
-        0x1f => { // <BS>
+        0x7f => { // <BS>
             if (term.quirks.backspace_as_delete) {
                 return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
             } else {
@@ -119,7 +119,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
                         // Lead-alt is legacy, so we only care about modifier,
                         // and key:
                         var kmod = k.mod;
-                        return Reply.ok(modKey(kmod.Alt(), k.key));
+                        return Reply.ok(modKey(kmod.Alt(), k.key), reply.rest);
                     },
                     .paste,
                     .mouse,
@@ -135,6 +135,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
             }
         },
     }
+    unreachable;
 }
 
 fn parseSS3(term: TermRead, in: []const u8) Reply {
@@ -162,7 +163,7 @@ fn parseSS3(term: TermRead, in: []const u8) Reply {
 
 fn parseCSI(term: TermRead, in: []const u8) Reply {
     _ = term;
-    _ = in;
+    return Reply.ok(text('!'), in);
 }
 
 fn parseText(term: TermRead, in: []const u8) Reply {
@@ -207,12 +208,35 @@ fn mod() KeyMod {
 
 fn special(key_type: KeyTag) TermReport {
     return TermReport{ .key = KeyReport{
-        .key = key_type,
+        .key = specialKey(key_type),
     } };
 }
 
-fn specialKey(key_type: KeyTag) KeyReport {
-    return KeyReport{ .key = key_type };
+fn specialKey(key_type: KeyTag) Key {
+    switch (key_type) {
+        .backspace => return Key{ .backspace = {} },
+        .enter => return Key{ .enter = {} },
+        .left => return Key{ .left = {} },
+        .right => return Key{ .right = {} },
+        .up => return Key{ .up = {} },
+        .down => return Key{ .down = {} },
+        .home => return Key{ .home = {} },
+        .end => return Key{ .end = {} },
+        .page_up => return Key{ .page_up = {} },
+        .page_down => return Key{ .page_down = {} },
+        .tab => return Key{ .tab = {} },
+        .back_tab => return Key{ .back_tab = {} },
+        .delete => return Key{ .delete = {} },
+        .insert => return Key{ .insert = {} },
+        .esc => return Key{ .esc = {} },
+        .caps_lock => return Key{ .caps_lock = {} },
+        .scroll_lock => return Key{ .scroll_lock = {} },
+        .num_lock => return Key{ .num_lock = {} },
+        .print_screen => return Key{ .print_screen = {} },
+        .pause => return Key{ .pause = {} },
+        .menu => return Key{ .menu = {} },
+        .f, .char, .keypad, .media, .modifier => unreachable,
+    }
 }
 
 fn fKey(num: u21) TermReport {
@@ -225,7 +249,7 @@ fn notRecognized(in: []const u8, rest: []const u8) Reply {
     return Reply{
         .status = .unrecognized,
         .report = TermReport{
-            .{ .unrecognized = .{ .sequence = in } },
+            .unrecognized = .{ .sequence = in },
         },
         .rest = rest,
     };
@@ -234,8 +258,8 @@ fn notRecognized(in: []const u8, rest: []const u8) Reply {
 fn moreNeeded(is_paste: bool, rest: []const u8) Reply {
     return Reply{
         .status = .more,
-        .report = MoreReport{
-            .is_paste = is_paste,
+        .report = TermReport{
+            .more = .{ .is_paste = is_paste },
         },
         .rest = rest,
     };
@@ -405,48 +429,57 @@ pub const KeyMod = packed struct(u8) {
     capslock: bool = false,
     numlock: bool = false,
 
-    pub fn Shift(m: *KeyMod) KeyMod {
-        m.shift = true;
-        return m;
+    pub fn Shift(m: KeyMod) KeyMod {
+        var m1 = m;
+        m1.shift = true;
+        return m1;
     }
 
-    pub fn Alt(m: *KeyMod) KeyMod {
-        m.alt = true;
+    pub fn Alt(m: KeyMod) KeyMod {
+        var m1 = m;
+        m1.alt = true;
+        return m1;
     }
 
-    pub fn Control(m: *KeyMod) KeyMod {
-        m.control = true;
-        return m;
+    pub fn Control(m: KeyMod) KeyMod {
+        var m1 = m;
+        m1.control = true;
+        return m1;
     }
 
-    pub fn Super(m: *KeyMod) KeyMod {
-        m.super = true;
-        return m;
+    pub fn Super(m: KeyMod) KeyMod {
+        var m1 = m;
+        m1.super = true;
+        return m1;
     }
 
-    pub fn Hyper(m: *KeyMod) KeyMod {
-        m.super = true;
-        return m;
+    pub fn Hyper(m: KeyMod) KeyMod {
+        var m1 = m;
+        m1.super = true;
+        return m1;
     }
 
     pub fn Meta(m: *KeyMod) KeyMod {
-        m.meta = true;
-        return m;
+        var m1 = m;
+        m1.meta = true;
+        return m1;
     }
 
     pub fn Capslock(m: *KeyMod) KeyMod {
-        m.capslock = true;
-        return m;
+        var m1 = m;
+        m1.capslock = true;
+        return m1;
     }
 
     pub fn Numlock(m: *KeyMod) KeyMod {
-        m.numlock = true;
-        return m;
+        var m1 = m;
+        m1.numlock = true;
+        return m1;
     }
 };
 
 /// All possible Key types.
-pub const KeyTag = enum(u4) {
+pub const KeyTag = enum(u5) {
     backspace,
     enter,
     left,
@@ -464,7 +497,6 @@ pub const KeyTag = enum(u4) {
     f,
     char,
     keypad,
-    null,
     esc,
     caps_lock,
     scroll_lock,
@@ -495,7 +527,6 @@ pub const Key = union(KeyTag) {
     f: u6,
     char: u21,
     keypad: KeyPadKey,
-    null,
     esc,
     caps_lock,
     scroll_lock,
@@ -721,3 +752,21 @@ const UCS = struct {
     pub const ISOLevel3Shift = 57453;
     pub const ISOLevel5Shift = 57454;
 };
+
+//| Tests
+//
+
+const talloc = std.testing.allocator;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+
+test "parsing" {
+    const term = TermRead{};
+    {
+        const reply = term.read("\x00");
+        try expectEqual(.complete, reply.status);
+        const key = reply.report.key;
+        try expect(key.mod.control);
+        try expectEqual(' ', key.key.char);
+    }
+}
