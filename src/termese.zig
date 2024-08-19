@@ -107,7 +107,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
     }
     switch (in[1]) {
         'O' => return term.parseSS3(in),
-        '[' => return term.parseCSI(in),
+        '[' => return term.parseCsi(in),
         0x1b => { // Legacy Alt-Esc
             return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
         },
@@ -145,25 +145,61 @@ fn parseSS3(term: TermRead, in: []const u8) Reply {
     if (in.len == 2) return moreNeeded(false, in);
 
     switch (in[2]) {
-        'A' => return Reply.ok(special(.up), in[2..]),
-        'B' => return Reply.ok(special(.down), in[2..]),
-        'C' => return Reply.ok(special(.right), in[2..]),
-        'D' => return Reply.ok(special(.left), in[2..]),
-        'H' => return Reply.ok(special(.home), in[2..]),
-        'F' => return Reply.ok(special(.end), in[2..]),
+        'A' => return Reply.ok(special(.up), in[3..]),
+        'B' => return Reply.ok(special(.down), in[3..]),
+        'C' => return Reply.ok(special(.right), in[3..]),
+        'D' => return Reply.ok(special(.left), in[3..]),
+        'H' => return Reply.ok(special(.home), in[3..]),
+        'F' => return Reply.ok(special(.end), in[3..]),
         'P'...'S' => |fk| {
-            return Reply.ok(fKey(fk - 0x4f), in[2..]);
+            return Reply.ok(fKey(fk - 0x4f), in[3..]);
         },
         else => { // Valid esc code, don't know what
-            return notRecognized(in[0..2], in[2..]);
+            return notRecognized(in[0..3], in[3..]);
         },
     }
     _ = term;
 }
 
-fn parseCSI(term: TermRead, in: []const u8) Reply {
+fn parseCsi(term: TermRead, in: []const u8) Reply {
+    var out: usize = 0; // Set to index of error or final byte.
+    const may_b = getFinalByte(in, &out) catch {
+        return malformedRead(out, in);
+    };
+    if (may_b == null) {
+        return moreNeeded(false, in);
+    } // That checked, we can do this:
+    const b = may_b.?;
+    const rest = in[out + 1 ..];
+    // Csi-u?
+    if (b == 'u') return term.parseCsiU(in[2..out], rest);
+    // Case of no modifiers.
+    if (out == 2) {
+        switch (b) { // Various legacy special keys
+            'A' => return Reply.ok(special(.up), rest),
+            'B' => return Reply.ok(special(.down), rest),
+            'C' => return Reply.ok(special(.right), rest),
+            'D' => return Reply.ok(special(.left), rest),
+            'E' => return Reply.ok(keyPad(.KP_Begin), rest),
+            'H' => return Reply.ok(special(.home), rest),
+            'F' => return Reply.ok(special(.end), rest),
+            'P' => return Reply.ok(fKey(1), rest),
+            'Q' => return Reply.ok(fKey(2), rest),
+            'S' => return Reply.ok(fKey(4), rest),
+            else => return notRecognized(in[0..out], rest),
+        }
+    }
+    if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
+        // parseModifiedCSI
+    }
+    // Many options due to reporting of various sorts, TBD
+    unreachable; // Will be..
+}
+
+fn parseCsiU(term: TermRead, seq: []const u8, rest: []const u8) Reply {
     _ = term;
-    return Reply.ok(text('!'), in);
+    _ = seq;
+    return malformedRead(0, rest);
 }
 
 fn parseText(term: TermRead, in: []const u8) Reply {
@@ -175,6 +211,43 @@ fn parseText(term: TermRead, in: []const u8) Reply {
         return malformedRead(b, in);
     };
     return Reply.ok(text(code), in[b..]);
+}
+
+/// Verify the integrity of the CSI control sequence, returning the
+/// final byte. or throwing an `InvalidCSI` error if the string is
+/// not valid.  If the string is valid but no final byte is reached,
+/// return `null` (partial command).  An out parameter is provided to
+/// report the index of either an error or a found final byte.
+///
+/// References are to ECMA-48/1991.
+fn getFinalByte(in: []const u8, out: *usize) error{InvalidCSI}!?u8 {
+    // §5.4.1b
+    const is_private_use = 0x3c <= in[2] and in[2] <= 0x3f;
+    const hi: u8 = if (is_private_use)
+        0x3f
+    else
+        0x3b;
+    var intermediate = false;
+    for (2..in.len) |i| {
+        const b = in[i];
+        if (!intermediate) {
+            if (0x30 <= b and b <= hi) {
+                continue;
+            } else if (0x20 <= b and b <= 0x2f) {
+                intermediate = true;
+            }
+        } else { // TODO: does anything actually use > 1 intermediate byte?
+            if (0x20 <= b and b <= 0x2f) continue;
+        } // Final byte? §5.4d)
+        if (0x40 <= b and b <= 0x7e) {
+            out.* = i;
+            return b;
+        } else {
+            out.* = i;
+            return error.InvalidCSI;
+        }
+    }
+    return null;
 }
 
 //| Builders.
@@ -240,6 +313,18 @@ fn specialKey(key_type: KeyTag) Key {
     }
 }
 
+fn keyPad(key_type: KeyPadCode) TermReport {
+    return TermReport{ .key = KeyReport{
+        .value = kpKey(key_type),
+    } };
+}
+
+fn kpKey(key_type: KeyPadCode) Key {
+    return Key{
+        .keypad = .{ .code = key_type },
+    };
+}
+
 fn fKey(num: u21) TermReport {
     return TermReport{ .key = KeyReport{
         .value = Key{ .f = @intCast(num) },
@@ -256,13 +341,13 @@ fn notRecognized(in: []const u8, rest: []const u8) Reply {
     };
 }
 
-fn moreNeeded(is_paste: bool, rest: []const u8) Reply {
+fn moreNeeded(is_paste: bool, in: []const u8) Reply {
     return Reply{
         .status = .more,
         .report = TermReport{
             .more = .{ .is_paste = is_paste },
         },
-        .rest = rest,
+        .rest = in,
     };
 }
 
