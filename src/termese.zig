@@ -65,7 +65,7 @@ pub const Quirks = packed struct(u8) {
 /// buffer.
 pub fn read(term: TermRead, in: []const u8) Reply {
     switch (in[0]) {
-        // NUL is legacy for Ctrl-space.
+        // NUL is legacy for Ctrl-Space.
         0 => return Reply.ok(modText(mod().Control(), ' '), in[1..]),
         // Legacy ^X, for some values of X.
         0x01...0x07, 0x0a...0x0c, 0x0e...0x1a => |c| {
@@ -119,7 +119,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
                         // Lead-alt is legacy, so we only care about modifier,
                         // and key:
                         var kmod = k.mod;
-                        return Reply.ok(modKey(kmod.Alt(), k.key), reply.rest);
+                        return Reply.ok(modKey(kmod.Alt(), k.value), reply.rest);
                     },
                     .paste,
                     .mouse,
@@ -180,7 +180,7 @@ fn parseText(term: TermRead, in: []const u8) Reply {
 
 fn text(char: u21) TermReport {
     return TermReport{ .key = KeyReport{
-        .key = Key{
+        .value = Key{
             .char = char,
         },
     } };
@@ -188,14 +188,14 @@ fn text(char: u21) TermReport {
 
 fn modKey(modifier: KeyMod, key: Key) TermReport {
     return TermReport{ .key = KeyReport{
-        .key = key,
+        .value = key,
         .mod = modifier,
     } };
 }
 
 fn modText(modifier: KeyMod, char: u21) TermReport {
     return TermReport{ .key = KeyReport{
-        .key = Key{
+        .value = Key{
             .char = char,
         },
         .mod = modifier,
@@ -208,7 +208,7 @@ fn mod() KeyMod {
 
 fn special(key_type: KeyTag) TermReport {
     return TermReport{ .key = KeyReport{
-        .key = specialKey(key_type),
+        .value = specialKey(key_type),
     } };
 }
 
@@ -241,7 +241,7 @@ fn specialKey(key_type: KeyTag) Key {
 
 fn fKey(num: u21) TermReport {
     return TermReport{ .key = KeyReport{
-        .key = Key{ .f = @intCast(num) },
+        .value = Key{ .f = @intCast(num) },
     } };
 }
 
@@ -274,6 +274,8 @@ fn malformedRead(idx: usize, in: []const u8) Reply {
         .rest = in[idx..],
     };
 }
+
+//| Types
 
 pub const Reply = struct {
     /// The status of the read.
@@ -360,7 +362,7 @@ pub const MalformedReport = struct {
 
 pub const KeyReport = struct {
     mod: KeyMod = KeyMod{},
-    key: Key,
+    value: Key,
     action: KeyAction = .press,
     shifted: u21 = 0,
     base_key: u21 = 0,
@@ -459,19 +461,19 @@ pub const KeyMod = packed struct(u8) {
         return m1;
     }
 
-    pub fn Meta(m: *KeyMod) KeyMod {
+    pub fn Meta(m: KeyMod) KeyMod {
         var m1 = m;
         m1.meta = true;
         return m1;
     }
 
-    pub fn Capslock(m: *KeyMod) KeyMod {
+    pub fn Capslock(m: KeyMod) KeyMod {
         var m1 = m;
         m1.capslock = true;
         return m1;
     }
 
-    pub fn Numlock(m: *KeyMod) KeyMod {
+    pub fn Numlock(m: KeyMod) KeyMod {
         var m1 = m;
         m1.numlock = true;
         return m1;
@@ -759,14 +761,21 @@ const UCS = struct {
 const talloc = std.testing.allocator;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const OhSnap = @import("ohsnap");
 
 test "parsing" {
+    const oh = OhSnap{};
     const term = TermRead{};
     {
         const reply = term.read("\x00");
         try expectEqual(.complete, reply.status);
         const key = reply.report.key;
         try expect(key.mod.control);
-        try expectEqual(' ', key.key.char);
+        try expectEqual(' ', key.value.char);
     }
+    try oh.snap(
+        @src(),
+        \\
+        ,
+    ).show(term.read("\x09"));
 }
