@@ -293,6 +293,17 @@ pub const Reply = struct {
             .rest = rest,
         };
     }
+
+    pub fn format(
+        reply: Reply,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.print("status: {s}\n\n", .{@tagName(reply.status)});
+        try reply.report.format(fmt, options, writer);
+        try writer.print("rest of buffer: '{s}'\n", .{reply.rest});
+    }
 };
 
 /// Status of a read.
@@ -338,6 +349,39 @@ pub const TermReport = union(TermEventKind) {
     more: MoreReport,
     unrecognized: UnrecognizedReport,
     malformed: MalformedReport,
+
+    pub fn format(
+        term_report: TermReport,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        switch (term_report) {
+            .key => {
+                try writer.print("key: \n", .{});
+            },
+            .info => {
+                try writer.print("info: \n", .{});
+            },
+            .paste => {
+                try writer.print("paste: \n", .{});
+            },
+            .mouse => {
+                try writer.print("mouse: \n", .{});
+            },
+            .more => {
+                try writer.print("more: \n", .{});
+            },
+            .unrecognized => {
+                try writer.print("unrecognized: \n", .{});
+            },
+            .malformed => {
+                try writer.print("malformed: \n", .{});
+            },
+        }
+    }
 };
 
 pub const InfoReport = struct {
@@ -777,5 +821,5 @@ test "parsing" {
         @src(),
         \\
         ,
-    ).show(term.read("\x09"));
+    ).showFmt(term.read("\x09"));
 }
