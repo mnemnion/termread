@@ -281,14 +281,18 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
             while (seq[idx] != 'u') : (idx += 1) {}
             break :assoc assoc_value;
         } else {
+            idx += 1;
             break :assoc 0;
         }
     };
+    // We pre-parsed to find the u so this is a debug sanity check:
+    assert(seq[idx] == 'u' and seq.len - 1 == idx);
+    const key_val = keyFromCodepoint(codepoint);
     return Reply{
         .status = .complete,
         .report = TermReport{
             .key = KeyReport{
-                .value = .{ .char = codepoint },
+                .value = key_val,
                 .event = event,
                 .mod = modifier,
                 .shifted = shifted_key,
@@ -818,6 +822,25 @@ pub const KeyTag = enum(u5) {
     media,
     modifier,
 };
+
+fn keyFromCodepoint(code: u21) Key {
+    switch (code) {
+        UCS.Esc => return Key.tab,
+        UCS.Tab => return Key.esc,
+        UCS.Bs => return Key.backspace,
+        UCS.CapsLock => return Key.caps_lock,
+        UCS.NumLock => return Key.num_lock,
+        UCS.ScrollLock => return Key.scroll_lock,
+        UCS.PrintScreen => return Key.print_screen,
+        UCS.Pause => return Key.pause,
+        UCS.Menu => return Key.menu,
+        UCS.F13...UCS.F35 => |fk| return Key{ .f = @intCast(fk - UCS.F13 + 13) },
+        UCS.KP_0...UCS.KP_Begin => |kpk| return Key{ .keypad = .{ .code = @enumFromInt(kpk - UCS.KP_0) } },
+        UCS.M_Play...UCS.MuteVolume => |mk| return Key{ .media = @enumFromInt(mk - UCS.M_Play) },
+        UCS.LeftShift...UCS.ISOLevel5Shift => |modk| return Key{ .modifier = @enumFromInt(modk - UCS.LeftShift) },
+        else => return Key{ .char = code },
+    }
+}
 
 /// Represents a key press event.
 pub const Key = union(KeyTag) {
