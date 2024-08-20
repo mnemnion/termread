@@ -106,7 +106,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
         return Reply.ok(special(.esc), in);
     }
     switch (in[1]) {
-        'O' => return term.parseSS3(in),
+        'O' => return term.parseSs3(in),
         '[' => return term.parseCsi(in),
         0x1b => { // Legacy Alt-Esc
             return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
@@ -138,7 +138,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
     unreachable;
 }
 
-fn parseSS3(term: TermRead, in: []const u8) Reply {
+fn parseSs3(term: TermRead, in: []const u8) Reply {
     assert(in[0] == 0x1b);
     assert(in[1] == 'O');
     // If that's all we got, there may well be more coming:
@@ -151,7 +151,7 @@ fn parseSS3(term: TermRead, in: []const u8) Reply {
         'D' => return Reply.ok(special(.left), in[3..]),
         'H' => return Reply.ok(special(.home), in[3..]),
         'F' => return Reply.ok(special(.end), in[3..]),
-        'P'...'S' => |fk| {
+        'P'...'S' => |fk| { // 'P' - 0x4f aka '0' == 1
             return Reply.ok(fKey(fk - 0x4f), in[3..]);
         },
         else => { // Valid esc code, don't know what
@@ -195,7 +195,7 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
         }
     }
     if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
-        // parseModifiedCSI
+        return term.parseModifiedCsi(info, in);
     }
     // Many options due to reporting of various sorts, TBD
     unreachable; // Will be..
@@ -343,6 +343,44 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
         },
         .rest = rest,
     };
+}
+
+fn parseModifiedCsi(term: TermRead, info: CsiInfo, in: []const u8) Reply {
+    _ = term;
+    assert(in[0] == '\x1b');
+    assert(in[1] == '[');
+    if (info.byte == '~') { // Legacy special keys
+        const keyval, const idx_delta = parseParameter(u21, in[2..]) catch {
+            return malformedRead(info.stop, in);
+        };
+        var modifier: KeyMod = mod();
+        if (in[2 + idx_delta] == ';') {
+            var mod_val, _ = parseParameter(u9, in[3 + idx_delta ..]) catch {
+                return malformedRead(info.stop, in);
+            };
+            mod_val -= 1;
+            if (mod_val <= std.math.maxInt(u8)) {
+                const mod8: u8 = @intCast(mod_val);
+                modifier = @bitCast(mod8);
+            } // TODO: needs an assert that we've read to the ~
+        }
+        const key: Key = switch (keyval) {
+            2 => specialKey(.insert),
+            3 => specialKey(.delete),
+            5 => specialKey(.page_up),
+            6 => specialKey(.page_down),
+            15 => Key{ .f = 5 },
+            // F6 - F12
+            17...24 => |fk| Key{ .f = @intCast(fk - 11) },
+            29 => specialKey(.menu),
+            else => return malformedRead(info.stop, in),
+        };
+        return Reply.ok(modKey(modifier, key), in[info.stop..]);
+    }
+    unreachable;
+    // const indicator, const idx_delta = parseParameter(u21, in[idx..]) catch {
+    //     return malformedRead(info.stop, in);
+    // };
 }
 
 fn parseText(term: TermRead, in: []const u8) Reply {
