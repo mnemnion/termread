@@ -221,7 +221,7 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
         // Overlarge codepoint
         return malformedRead(2 + seq.len, in);
     }
-    if (idx == seq.len - 2) {
+    if (idx == seq.len - 1) {
         // Easy
         return Reply.ok(text(codepoint), rest);
     }
@@ -232,7 +232,6 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
             idx += 1;
             if (seq[idx] == ':') {
                 // Base key but no shift
-                idx += 1;
                 break :shifted 0;
             } else {
                 const shift_point, const idx_delta = parseParameter(u21, seq[idx..]) catch {
@@ -252,13 +251,14 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     const base_key: u21 = base: {
         if (has_shifted) {
             if (seq[idx] == ':') {
-                const base_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]) catch {
+                idx += 1;
+                const base_point, const idx_delta = parseParameter(u21, seq[idx..]) catch {
                     return malformedRead(seq_idx, in);
                 };
                 if (base_point > UTF_MAX) {
-                    return malformedRead(2 + seq.len, in);
+                    return malformedRead(seq_idx, in);
                 }
-                idx += 1 + idx_delta;
+                idx += idx_delta;
                 break :base base_point;
             } else {
                 // ? assert(seq[idx] == ';') possible malformations though
@@ -323,7 +323,6 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
             while (seq[idx] != 'u') : (idx += 1) {}
             break :assoc assoc_value;
         } else {
-            idx += 1;
             break :assoc 0;
         }
     };
@@ -1197,4 +1196,9 @@ test "parsing" {
         \\
         ,
     ).showFmt(term.read("\x1b\x1b"));
+    try oh.snap(
+        @src(),
+        \\
+        ,
+    ).showFmt(term.read("\x1b[97;4u"));
 }
