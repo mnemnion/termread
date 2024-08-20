@@ -205,14 +205,23 @@ const UTF_MAX = 0x10ffff;
 
 fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) Reply {
     _ = term;
-    // Structure: CSI handled, 'u' is known.
+    // Preconditions
+    assert(in[0] == '\x1b');
+    assert(in[1] == '[');
+    assert(in[2] == seq[0]);
+    assert(seq[seq.len - 1] == 'u');
+    // Structure:
     // unicode-key-code[:shifted-key[:base-layout-key]][;modifiers[:event-type][;text-as-codepoints]]u
-    const codepoint, var idx = parseParameter(u21, seq);
+    // CSI validated, 'u' is known.
+    const seq_idx = 2 + seq.len;
+    const codepoint, var idx = parseParameter(u21, seq) catch {
+        return malformedRead(seq_idx, in);
+    };
     if (codepoint > UTF_MAX) {
         // Overlarge codepoint
         return malformedRead(2 + seq.len, in);
     }
-    if (idx == seq.len) {
+    if (idx == seq.len - 2) {
         // Easy
         return Reply.ok(text(codepoint), rest);
     }
@@ -226,14 +235,16 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
                 idx += 1;
                 break :shifted 0;
             } else {
-                const shift_point, const idx_delta = parseParameter(u21, seq[idx..]);
+                const shift_point, const idx_delta = parseParameter(u21, seq[idx..]) catch {
+                    return malformedRead(seq_idx, in);
+                };
                 if (shift_point > UTF_MAX) {
-                    return malformedRead(2 + seq.len, in);
+                    return malformedRead(seq_idx, in);
                 }
                 idx += idx_delta;
                 break :shifted shift_point;
             }
-        } else {
+        } else { // No cursor advance here (expect ';')
             break :shifted 0;
         }
     };
@@ -241,7 +252,9 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     const base_key: u21 = base: {
         if (has_shifted) {
             if (seq[idx] == ':') {
-                const base_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]);
+                const base_point, const idx_delta = parseParameter(u21, seq[idx + 1 ..]) catch {
+                    return malformedRead(seq_idx, in);
+                };
                 if (base_point > UTF_MAX) {
                     return malformedRead(2 + seq.len, in);
                 }
@@ -258,7 +271,9 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     if (seq[idx] == ';') {
         idx += 1;
         if (seq[idx] != ';') {
-            var mod_value, const idx_delta = parseParameter(u9, seq[idx..]);
+            var mod_value, const idx_delta = parseParameter(u9, seq[idx..]) catch {
+                return malformedRead(seq_idx, in);
+            };
             mod_value -= 1;
             if (mod_value <= std.math.maxInt(u8)) {
                 const mod8: u8 = @intCast(mod_value);
@@ -266,20 +281,22 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
             }
             idx += idx_delta;
         }
-    }
-    // TODO: if shift_key > 0, modifier.shift must be true
+    } // Spec requires this to be consistent:
+    if (shifted_key > 0 and !modifier.shift) return malformedRead(2 + seq.len, in);
 
     // Event type?
     const event: KeyEvent = event: {
         if (seq[idx] == ':') {
             idx += 1;
-            const event_value, const idx_delta = parseParameter(u2, seq[idx..]);
+            const event_value, const idx_delta = parseParameter(u2, seq[idx..]) catch {
+                return malformedRead(seq_idx, in);
+            };
             idx += idx_delta;
             switch (event_value) {
                 1 => break :event .press,
                 2 => break :event .repeat,
                 3 => break :event .release,
-                0 => unreachable, // TODO: parse failures generally, definitely here
+                0 => return malformedRead(2 + seq.len, in),
             }
         } else {
             break :event .press;
@@ -298,7 +315,9 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
         // of KeyReports doesn't get out of hand, though.
         if (seq[idx] == ';') {
             idx += 1;
-            const assoc_value, const idx_delta = parseParameter(u21, seq[idx..]);
+            const assoc_value, const idx_delta = parseParameter(u21, seq[idx..]) catch {
+                return malformedRead(seq_idx, in);
+            };
             idx += idx_delta;
             // Drop anything else on the floor where it belongs
             while (seq[idx] != 'u') : (idx += 1) {}
@@ -308,8 +327,8 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
             break :assoc 0;
         }
     };
-    // We pre-parsed to find the u so this is a debug sanity check:
-    assert(seq[idx] == 'u' and seq.len - 1 == idx);
+    // Assertion: we read the entire sequence
+    assert(seq[idx] == 'u');
     const key_val = keyFromCodepoint(codepoint);
     return Reply{
         .status = .complete,
@@ -338,14 +357,26 @@ fn parseText(term: TermRead, in: []const u8) Reply {
     return Reply.ok(text(code), in[b..]);
 }
 
+const ParameterError = error{
+    BadParameter,
+    ParameterTooBig,
+};
+
 // Parse a parameter into integer type T, returning the value and next index.
-fn parseParameter(T: type, seq: []const u8) struct { T, usize } {
+fn parseParameter(T: type, seq: []const u8) ParameterError!struct { T, usize } {
     // TODO: Throw an error here
     var i: usize = 0;
     while ('0' <= seq[i] and seq[i] <= '9') : (i += 1) {}
     if (i > 0) {
-        const value: T = std.fmt.parseInt(T, seq[0..i], 10) catch unreachable;
-        return .{ value, i };
+        const parsed_value: usize = std.fmt.parseInt(T, seq[0..i], 10) catch {
+            return error.BadParameter;
+        };
+        if (parsed_value <= std.math.maxInt(T)) {
+            const value: T = @intCast(parsed_value);
+            return .{ value, i };
+        } else {
+            return error.ParameterTooBig;
+        }
     } else @panic("parseParameter called on non-numeric sequence");
 }
 
@@ -1160,5 +1191,10 @@ test "parsing" {
         @src(),
         \\
         ,
-    ).showFmt(term.read("Q"));
+    ).showFmt(term.read("Qz"));
+    try oh.snap(
+        @src(),
+        \\
+        ,
+    ).showFmt(term.read("\x1b\x1b"));
 }
