@@ -506,15 +506,15 @@ fn specialKey(key_type: KeyTag) Key {
     }
 }
 
-fn keyPad(key_type: KeyPadCode) TermReport {
+fn keyPad(key_type: KeyPadKey) TermReport {
     return TermReport{ .key = KeyReport{
         .value = kpKey(key_type),
     } };
 }
 
-fn kpKey(key_type: KeyPadCode) Key {
+fn kpKey(key_type: KeyPadKey) Key {
     return Key{
-        .keypad = .{ .code = key_type },
+        .keypad = key_type,
     };
 }
 
@@ -905,6 +905,7 @@ pub const KeyTag = enum(u5) {
 };
 
 fn keyFromCodepoint(code: u21) Key {
+    assert(code <= UTF_MAX);
     switch (code) {
         UCS.Esc => return Key.tab,
         UCS.Tab => return Key.esc,
@@ -916,7 +917,7 @@ fn keyFromCodepoint(code: u21) Key {
         UCS.Pause => return Key.pause,
         UCS.Menu => return Key.menu,
         UCS.F13...UCS.F35 => |fk| return Key{ .f = @intCast(fk - UCS.F13 + 13) },
-        UCS.KP_0...UCS.KP_Begin => |kpk| return Key{ .keypad = .{ .code = @enumFromInt(kpk - UCS.KP_0) } },
+        UCS.KP_0...UCS.KP_Begin => |kpk| return Key{ .keypad = @enumFromInt(kpk - UCS.KP_0) },
         UCS.M_Play...UCS.MuteVolume => |mk| return Key{ .media = @enumFromInt(mk - UCS.M_Play) },
         UCS.LeftShift...UCS.ISOLevel5Shift => |modk| return Key{ .modifier = @enumFromInt(modk - UCS.LeftShift) },
         else => return Key{ .char = code },
@@ -989,14 +990,42 @@ pub const ModifierKey = enum(u4) {
 };
 
 /// Represents a keypad character press.
-pub const KeyPadKey = struct {
-    code: KeyPadCode,
+pub const KeyPadKey = enum(u5) {
+    KP_0,
+    KP_1,
+    KP_2,
+    KP_3,
+    KP_4,
+    KP_5,
+    KP_6,
+    KP_7,
+    KP_8,
+    KP_9,
+    KP_Decimal,
+    KP_Divide,
+    KP_Multiply,
+    KP_Subtract,
+    KP_Add,
+    KP_Enter,
+    KP_Equal,
+    KP_Separator,
+    KP_Left,
+    KP_Right,
+    KP_Up,
+    KP_Down,
+    KP_PageUp,
+    KP_PageDown,
+    KP_Home,
+    KP_End,
+    KP_Insert,
+    KP_Delete,
+    KP_Begin,
 
     /// Return the value of the button pressed.  Some such
     /// values are from the Private Use Area and must be
     /// translated into a normalized form.
     pub fn value(key: KeyPadKey, iso_sep: bool) u21 {
-        switch (key.code) {
+        switch (key) {
             .KP_0 => return '0',
             .KP_1 => return '1',
             .KP_2 => return '2',
@@ -1040,38 +1069,6 @@ pub const KeyPadKey = struct {
             .KP_Begin => return UCS.KP_Begin,
         }
     }
-};
-
-pub const KeyPadCode = enum(u5) {
-    KP_0,
-    KP_1,
-    KP_2,
-    KP_3,
-    KP_4,
-    KP_5,
-    KP_6,
-    KP_7,
-    KP_8,
-    KP_9,
-    KP_Decimal,
-    KP_Divide,
-    KP_Multiply,
-    KP_Subtract,
-    KP_Add,
-    KP_Enter,
-    KP_Equal,
-    KP_Separator,
-    KP_Left,
-    KP_Right,
-    KP_Up,
-    KP_Down,
-    KP_PageUp,
-    KP_PageDown,
-    KP_Home,
-    KP_End,
-    KP_Insert,
-    KP_Delete,
-    KP_Begin,
 };
 
 /// Namespace for Unicode key values.  Kitty-focused.
@@ -1201,4 +1198,9 @@ test "parsing" {
         \\
         ,
     ).showFmt(term.read("\x1b[97;4u"));
+}
+
+test "KeyPadKey" {
+    const kp_key = KeyPadKey.KP_2;
+    try expectEqual('2', kp_key.value(false));
 }
