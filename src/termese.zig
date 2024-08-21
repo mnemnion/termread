@@ -127,6 +127,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
                     .mouse,
                     .info,
                     .more,
+                    .associated_text,
                     => {
                         // Plausible interpretation: Esc followed by something
                         // else.  Rather than try and figure it out, we report
@@ -354,6 +355,7 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
             break :assoc 0;
         }
     };
+    _ = associated; // TODO: deal with this bullshit
     // Assertion: we read the entire sequence
     assert(seq[idx] == 'u');
     const key_val = keyFromCodepoint(codepoint);
@@ -366,7 +368,6 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
                 .mod = modifier,
                 .shifted = shifted_key,
                 .base_key = base_key,
-                .associated = associated,
             },
         },
         .rest = rest,
@@ -712,6 +713,8 @@ pub const TermEventKind = enum(u4) {
     mouse,
     /// More read is needed.
     more,
+    /// A key report with associated text.
+    associated_text,
     /// Unrecognized but valid sequence.
     unrecognized,
     /// Malformed sequence
@@ -729,6 +732,7 @@ pub const TermReport = union(TermEventKind) {
     paste: Paste,
     mouse: MouseReport,
     more: MoreReport,
+    associated_text: AssociatedTextReport,
     unrecognized: UnrecognizedReport,
     malformed: MalformedReport,
 
@@ -755,6 +759,9 @@ pub const TermReport = union(TermEventKind) {
             },
             .more => {
                 try writer.print("more: \n", .{});
+            },
+            .associated_text => {
+                try writer.print("associated text: \n", .{});
             },
             .unrecognized => {
                 try writer.print("unrecognized: \n", .{});
@@ -786,15 +793,17 @@ pub const MalformedReport = struct {
     sequence: []const u8,
 };
 
+pub const AssociatedTextReport = struct {
+    key: KeyReport,
+    text: []const u8,
+};
+
 pub const KeyReport = struct {
     mod: KeyMod = KeyMod{},
     value: Key,
     event: KeyEvent = .press,
     shifted: u21 = 0,
     base_key: u21 = 0,
-    // TODO: the standard allows arbitrary numbers of codepoints here,
-    // which is insane. What do?
-    associated: u21 = 0,
 
     pub fn format(
         key: KeyReport,
