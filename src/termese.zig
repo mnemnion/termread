@@ -102,6 +102,7 @@ pub fn read(term: TermRead, in: []const u8) Reply {
 }
 
 fn parseEsc(term: TermRead, in: []const u8) Reply {
+    assert(in[0] == '\x1b');
     if (in.len == 1) {
         return Reply.ok(special(.esc), in);
     }
@@ -111,7 +112,8 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
         0x1b => { // Legacy Alt-Esc
             return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
         },
-        else => { // Lead alt probably.
+        'P' => {}, // A kind of reporting https://terminalguide.namepad.de/seq/csi_sw_t_dollar-1/
+        else => { // Lead alt, probably.
             const reply = term.read(in[1..]);
             if (reply.status == .complete) {
                 switch (reply.report) {
@@ -127,8 +129,9 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
                     .more,
                     => {
                         // Plausible interpretation: Esc followed by something
-                        // else.
-                        return Reply.ok(special(.esc), in[2..]);
+                        // else.  Rather than try and figure it out, we report
+                        // the escape and handle a reparse.
+                        return Reply.ok(special(.esc), in[1..]);
                     },
                     .unrecognized, .malformed => return reply,
                 }
@@ -196,6 +199,31 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
     }
     if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
         return term.parseModifiedCsi(info, in);
+    }
+    // Handle other CSI sequences we might see
+    switch (b) {
+        'M' => {}, // Mouse
+        'Z' => {
+            // Support fixterms Ctrl-Shift-Tab
+            if (std.mem.eql(u8, in[2..6], "1;5")) {
+                return Reply.ok(modKey(mod().Shift().Control(), specialKey(.tab)), rest);
+            } else { // There are some sequences here, probably not worth recognizing
+                return notRecognized(in[0..info.stop], rest);
+            }
+        },
+        'R' => {}, // cursor origin report https://terminalguide.namepad.de/seq/csi_sn-6/
+        '?' => {}, // Queries
+        else => return notRecognized(in[0..info.stop], rest),
+    }
+    if (info.is_private_use) {
+        assert('<' <= in[2] and in[2] <= '?');
+        switch (in[2]) {
+            '<' => {},
+            '=' => {},
+            '>' => {},
+            '?' => {}, // Various sorts of réportage
+            else => unreachable,
+        }
     }
     // Many options due to reporting of various sorts, TBD
     unreachable; // Will be..
@@ -349,6 +377,7 @@ fn parseModifiedCsi(term: TermRead, info: CsiInfo, in: []const u8) Reply {
     _ = term;
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
+    const rest = in[info.stop..];
     if (info.byte == '~') { // Legacy special keys
         const keyval, const idx_delta = parseParameter(u21, in[2..]) catch {
             return malformedRead(info.stop, in);
@@ -362,6 +391,8 @@ fn parseModifiedCsi(term: TermRead, info: CsiInfo, in: []const u8) Reply {
             if (mod_val <= std.math.maxInt(u8)) {
                 const mod8: u8 = @intCast(mod_val);
                 modifier = @bitCast(mod8);
+            } else {
+                return malformedRead(info.stop, in);
             } // TODO: needs an assert that we've read to the ~
         }
         const key: Key = switch (keyval) {
@@ -375,12 +406,46 @@ fn parseModifiedCsi(term: TermRead, info: CsiInfo, in: []const u8) Reply {
             29 => specialKey(.menu),
             else => return malformedRead(info.stop, in),
         };
-        return Reply.ok(modKey(modifier, key), in[info.stop..]);
+        return Reply.ok(modKey(modifier, key), rest);
     }
-    unreachable;
-    // const indicator, const idx_delta = parseParameter(u21, in[idx..]) catch {
-    //     return malformedRead(info.stop, in);
-    // };
+    // Get modifier one of two ways.
+    var modifier: KeyMod = mod();
+    if (in[3] == '1' and in[4] == ';') {
+        var mod_val, _ = parseParameter(u9, in[5..]) catch {
+            return malformedRead(info.stop, in);
+        };
+        mod_val -= 1;
+        if (mod_val <= std.math.maxInt(u8)) {
+            const mod8: u8 = @intCast(mod_val);
+            modifier = @bitCast(mod8);
+        } else {
+            return malformedRead(info.stop, in);
+        }
+    } else if ('0' <= in[3] and in[3] <= '9') {
+        var mod_val, _ = parseParameter(u9, in[3..]) catch {
+            return malformedRead(info.stop, in);
+        };
+        mod_val -= 1;
+        if (mod_val <= std.math.maxInt(u8)) {
+            const mod8: u8 = @intCast(mod_val);
+            modifier = @bitCast(mod8);
+        } else {
+            return malformedRead(info.stop, in);
+        }
+    }
+    switch (info.stop) {
+        'A' => return Reply.ok(modKey(modifier, specialKey(.up)), rest),
+        'B' => return Reply.ok(modKey(modifier, specialKey(.down)), rest),
+        'C' => return Reply.ok(modKey(modifier, specialKey(.right)), rest),
+        'D' => return Reply.ok(modKey(modifier, specialKey(.left)), rest),
+        'E' => return Reply.ok(modKey(modifier, kpKey(.KP_Begin)), rest),
+        'H' => return Reply.ok(modKey(modifier, specialKey(.home)), rest),
+        'F' => return Reply.ok(modKey(modifier, specialKey(.end)), rest),
+        'P' => return Reply.ok(modKey(modifier, Key{ .f = 1 }), rest),
+        'Q' => return Reply.ok(modKey(modifier, Key{ .f = 2 }), rest),
+        'S' => return Reply.ok(modKey(modifier, Key{ .f = 4 }), rest),
+        else => unreachable, // We checked this at function entrance
+    }
 }
 
 fn parseText(term: TermRead, in: []const u8) Reply {
@@ -439,7 +504,7 @@ const CsiInfo = struct {
 /// References are to ECMA-48/1991.
 fn validateControlSequence(in: []const u8) ?CsiInfo {
     // §5.4.1b
-    const is_private_use = 0x3c <= in[2] and in[2] <= 0x3f;
+    const is_private_use = '<' <= in[2] and in[2] <= '?';
     if (is_private_use) return CsiInfo{
         .byte = 0xff,
         .stop = 3,
@@ -1236,6 +1301,11 @@ test "parsing" {
         \\
         ,
     ).showFmt(term.read("\x1b[97;4u"));
+    try oh.snap(
+        @src(),
+        \\
+        ,
+    ).showFmt(term.read("\x1b[B7;4u"));
 }
 
 test "KeyPadKey" {
