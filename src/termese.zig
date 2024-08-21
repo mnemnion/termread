@@ -44,7 +44,20 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+// NOTE: must always be greater than MAX_ASSOCIATED_TEXT * 4
+const BUF_SIZE = 116;
+// Maximum number of 'associated text' codepoints to decode.
+const MAX_ASSOCIATED_TEXT = 24;
+
+/// Flags to handle ambiguous or inconsistent inputs
 quirks: Quirks = Quirks{},
+/// View buffer for info and associated text.  Do not
+/// read directly, and information here will be included in
+/// a TermReport.
+buffer: [BUF_SIZE]u8 = .{0x20} ** BUF_SIZE,
+/// Internal tracking of how much of the buffer has been
+/// allocated.  Private, do not modify.
+buf_len: usize = 0,
 
 const TermRead = @This();
 
@@ -63,7 +76,7 @@ pub const Quirks = packed struct(u8) {
 /// Read one sequence from `in` buffer.  Returns a `Reply`, containing
 /// the status of the read, the report, and the remainder of the in
 /// buffer.
-pub fn read(term: TermRead, in: []const u8) Reply {
+pub fn read(term: *TermRead, in: []const u8) Reply {
     switch (in[0]) {
         // NUL is legacy for Ctrl-Space.
         0 => return Reply.ok(modText(mod().Control(), ' '), in[1..]),
@@ -101,7 +114,7 @@ pub fn read(term: TermRead, in: []const u8) Reply {
     }
 }
 
-fn parseEsc(term: TermRead, in: []const u8) Reply {
+fn parseEsc(term: *TermRead, in: []const u8) Reply {
     assert(in[0] == '\x1b');
     if (in.len == 1) {
         return Reply.ok(special(.esc), in);
@@ -142,7 +155,7 @@ fn parseEsc(term: TermRead, in: []const u8) Reply {
     unreachable;
 }
 
-fn parseSs3(term: TermRead, in: []const u8) Reply {
+fn parseSs3(term: *TermRead, in: []const u8) Reply {
     assert(in[0] == 0x1b);
     assert(in[1] == 'O');
     // If that's all we got, there may well be more coming:
@@ -165,7 +178,7 @@ fn parseSs3(term: TermRead, in: []const u8) Reply {
     _ = term;
 }
 
-fn parseCsi(term: TermRead, in: []const u8) Reply {
+fn parseCsi(term: *TermRead, in: []const u8) Reply {
     const maybe_info = validateControlSequence(in);
     if (maybe_info == null) {
         return moreNeeded(false, in);
@@ -232,8 +245,7 @@ fn parseCsi(term: TermRead, in: []const u8) Reply {
 
 const UTF_MAX = 0x10ffff;
 
-fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) Reply {
-    _ = term;
+fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8) Reply {
     // Preconditions
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
@@ -254,6 +266,7 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
         // Easy
         return Reply.ok(text(codepoint), rest);
     }
+    const key_val = keyFromCodepoint(codepoint);
     // Obtain shifted key, if available.
     const has_shifted = seq[idx] == ':';
     const shifted_key: u21 = shifted: {
@@ -332,33 +345,55 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
         }
     };
     // The protocol allows for any number of codepoints of associated text.
-    // This is unreasonable, and we will parse one (1) if we find it.
+    // This is unreasonable, so we set a sensible limit.
     // Tracking issue: https://github.com/kovidgoyal/kitty/issues/7749
-    const associated: u21 = assoc: {
-        // TODO: if we can get a satisfactory resolution to the unlimited
-        // codepoints issue, I can create an AssociatedTextReport which
-        // wraps a KeyReport and provides the associated text as a separate
-        // buffer of some number of codepoints.  It's ok if the total size
-        // of the TermReport union is a bit bloated, because they need to
-        // be unwrapped at the point of use.  It would be better if the size
-        // of KeyReports doesn't get out of hand, though.
-        if (seq[idx] == ';') {
-            idx += 1;
+    //
+    // Rather than allow a brain-damaged specification to DoS your
+    // program by spamming unlimited associated text, this library
+    // has decided to accept a generous buffer of up to 24 codepoints
+    // of associated text, more than twice the size of the largest
+    // actual grapheme (not Zalgo text) in Unicode 15.
+    // More text than this will be ignored.
+    if (seq[idx] == ';') {
+        idx += 1;
+        term.buf_len = 0;
+        var code_count: usize = 0;
+        while (code_count <= MAX_ASSOCIATED_TEXT) {
             const assoc_value, const idx_delta = parseParameter(u21, seq[idx..]) catch {
                 return malformedRead(seq_idx, in);
             };
+            if (assoc_value > UTF_MAX) {
+                return malformedRead(seq_idx, in);
+            }
+            const wrote = std.unicode.wtf8Encode(assoc_value, term.buffer[term.buf_len..]) catch unreachable;
+            term.buf_len += wrote;
             idx += idx_delta;
-            // Drop anything else on the floor where it belongs
-            while (seq[idx] != 'u') : (idx += 1) {}
-            break :assoc assoc_value;
-        } else {
-            break :assoc 0;
+            if (seq[idx] != ':') break;
+            idx += 1;
+            code_count += 1;
         }
-    };
-    _ = associated; // TODO: deal with this bullshit
+        // Drop anything else on the floor where it belongs
+        // Entrance to this function requires a 'u' so this is legitimate.
+        while (seq[idx] != 'u') : (idx += 1) {}
+        return Reply{
+            .status = .complete,
+            .report = TermReport{
+                .associated_text = AssociatedTextReport{
+                    .key = KeyReport{
+                        .value = key_val,
+                        .event = event,
+                        .mod = modifier,
+                        .shifted = shifted_key,
+                        .base_key = base_key,
+                    },
+                    .text = term.buffer[0..term.buf_len],
+                },
+            },
+            .rest = rest,
+        };
+    }
     // Assertion: we read the entire sequence
-    assert(seq[idx] == 'u');
-    const key_val = keyFromCodepoint(codepoint);
+    assert(idx == seq.len - 1);
     return Reply{
         .status = .complete,
         .report = TermReport{
@@ -374,7 +409,7 @@ fn parseCsiU(term: TermRead, in: []const u8, seq: []const u8, rest: []const u8) 
     };
 }
 
-fn parseModifiedCsi(term: TermRead, info: CsiInfo, in: []const u8) Reply {
+fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     _ = term;
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
@@ -449,7 +484,7 @@ fn parseModifiedCsi(term: TermRead, info: CsiInfo, in: []const u8) Reply {
     }
 }
 
-fn parseText(term: TermRead, in: []const u8) Reply {
+fn parseText(term: *TermRead, in: []const u8) Reply {
     _ = term;
     const b = std.unicode.utf8ByteSequenceLength(in[0]) catch {
         return malformedRead(1, in);
@@ -1287,7 +1322,7 @@ const OhSnap = @import("ohsnap");
 
 test "parsing" {
     const oh = OhSnap{};
-    const term = TermRead{};
+    var term = TermRead{};
     {
         const reply = term.read("\x00");
         try expectEqual(.complete, reply.status);
@@ -1320,4 +1355,38 @@ test "parsing" {
 test "KeyPadKey" {
     const kp_key = KeyPadKey.KP_2;
     try expectEqual('2', kp_key.value(false));
+}
+
+test "Associated Text" {
+    const oh = OhSnap{};
+    var term = TermRead{};
+    try oh.snap(
+        @src(),
+        \\termese.Reply
+        \\  .status: termese.ReadStatus
+        \\    .complete
+        \\  .report: termese.TermReport
+        \\    .associated_text: termese.AssociatedTextReport
+        \\      .key: termese.KeyReport
+        \\        .mod: termese.KeyMod
+        \\          .shift: bool = false
+        \\          .alt: bool = false
+        \\          .control: bool = true
+        \\          .super: bool = true
+        \\          .hyper: bool = false
+        \\          .meta: bool = false
+        \\          .capslock: bool = false
+        \\          .numlock: bool = false
+        \\        .value: termese.Key
+        \\          .char: u21 = 97
+        \\        .event: termese.KeyEvent
+        \\          .repeat
+        \\        .shifted: u21 = 0
+        \\        .base_key: u21 = 0
+        \\      .text: []const u8
+        \\        "αβγδ"
+        \\  .rest: []const u8
+        \\    ""
+        ,
+    ).expectEqual(term.read("\x1b[97;13:2;945:946:947:948u"));
 }
