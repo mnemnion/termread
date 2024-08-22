@@ -219,7 +219,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     }
     // Handle other CSI sequences we might see
     switch (b) {
-        'M', 'm' => {}, // Mouse DECSET something something
+        'M' => return parseDigitMouseEncodings(in, 1015),
         'Z' => {
             // Support fixterms Ctrl-Shift-Tab
             if (std.mem.eql(u8, in[2..6], "1;5")) {
@@ -229,13 +229,12 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
             }
         },
         'R' => {}, // cursor origin report https://terminalguide.namepad.de/seq/csi_sn-6/
-        '?' => {}, // Queries
         else => return notRecognized(in[0..info.stop], rest),
     }
     if (info.is_private_use) {
         assert('<' <= in[2] and in[2] <= '?');
         switch (in[2]) {
-            '<' => {},
+            '<' => return parseDigitMouseEncodings(in, 1006),
             '=' => {},
             '>' => {},
             '?' => {}, // Various sorts of réportage
@@ -445,6 +444,58 @@ fn parseDecset1005(in: []const u8) Reply {
         .unknown,
         in[rest_idx..],
     );
+}
+
+fn parseDigitMouseEncodings(in: []const u8, protocol: comptime_int) Reply {
+    assert(protocol == 1015 or protocol == 1006); // 1016 parsing is identical
+    var idx: usize = if (protocol == 1015) 2 else 3;
+    var btn, var idx_delta = parseParameter(u8, in[idx..]) catch {
+        return malformedRead(idx, in);
+    };
+    idx += idx_delta;
+    if (protocol == 1015) {
+        btn -= 32;
+    }
+    if (in[idx] != ';') {
+        return malformedRead(idx, in);
+    } else {
+        idx += 1;
+    }
+    var col, idx_delta = parseParameter(u16, in[idx..]) catch {
+        return malformedRead(idx, in);
+    };
+    if (protocol == 1015) {
+        col -= 32;
+    }
+    idx += idx_delta;
+    if (in[idx] != ';') {
+        return malformedRead(idx, in);
+    } else {
+        idx += 1;
+    }
+    var row, idx_delta = parseParameter(u16, in[idx..]) catch {
+        return malformedRead(idx, in);
+    };
+    if (protocol == 1015) {
+        row -= 32;
+    }
+    idx += idx_delta;
+    const release_status: MouseReleaseStatus = status: {
+        switch (in[idx]) {
+            'M' => {
+                if (protocol == 1015) {
+                    break :status .unknown;
+                } else {
+                    break :status .pressed;
+                }
+            },
+            'm' => break :status .released,
+            // TODO: this should be an unreachable,
+            // I need to look for other CSI < encodings
+            else => return malformedRead(idx, in),
+        }
+    };
+    return parseMouseNumbers(btn, col, row, release_status, in[idx + 1 ..]);
 }
 
 fn parseClassicMouse(in: []const u8) Reply {
