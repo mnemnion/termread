@@ -69,8 +69,10 @@ pub const Quirks = packed struct(u8) {
     backspace_as_delete: bool = false,
     /// ISO-keyboard-specific quirks.
     iso: bool = false,
+    /// Oddball UTF-8 encoded mouse movements (DECSET 1015)
+    utf8_encoded_mouse: bool = false,
     /// Reserved for other quirks.
-    reserved: u6 = 0,
+    reserved: u5 = 0,
 };
 
 /// Read one sequence from `in` buffer.  Returns a `Reply`, containing
@@ -169,7 +171,7 @@ fn parseSs3(term: *TermRead, in: []const u8) Reply {
         'H' => return Reply.ok(special(.home), in[3..]),
         'F' => return Reply.ok(special(.end), in[3..]),
         'P'...'S' => |fk| { // 'P' - 0x4f aka '0' == 1
-            return Reply.ok(fKey(fk - 0x4f), in[3..]);
+            return Reply.ok(function(fk - 0x4f), in[3..]);
         },
         else => { // Valid esc code, don't know what
             return notRecognized(in[0..3], in[3..]);
@@ -208,6 +210,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
             'H' => return Reply.ok(special(.home), rest),
             'F' => return Reply.ok(special(.end), rest),
             'Z' => return Reply.ok(modKey(mod().Shift(), specialKey(.tab)), rest),
+            'M' => return term.parseCsiMouse(in),
             else => return notRecognized(in[0..info.stop], rest),
         }
     }
@@ -216,7 +219,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     }
     // Handle other CSI sequences we might see
     switch (b) {
-        'M' => {}, // Mouse
+        'M', 'm' => {}, // Mouse DECSET something something
         'Z' => {
             // Support fixterms Ctrl-Shift-Tab
             if (std.mem.eql(u8, in[2..6], "1;5")) {
@@ -364,7 +367,7 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
             };
             if (assoc_value > UTF_MAX) {
                 return malformedRead(seq_idx, in);
-            }
+            } // WTF-8 == we don't care if it's a surrogate, yeet it
             const wrote = std.unicode.wtf8Encode(assoc_value, term.buffer[term.buf_len..]) catch unreachable;
             term.buf_len += wrote;
             idx += idx_delta;
@@ -373,7 +376,7 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
             code_count += 1;
         }
         // Drop anything else on the floor where it belongs
-        // Entrance to this function requires a 'u' so this is legitimate.
+        // We've validated CSI format and 'u' Fe so this is legitimate.
         while (seq[idx] != 'u') : (idx += 1) {}
         return Reply{
             .status = .complete,
@@ -407,6 +410,54 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
         },
         .rest = rest,
     };
+}
+
+fn parseCsiMouse(term: *TermRead, in: []const u8) Reply {
+    assert(std.mem.eql(u8, in[0..2], "\x1b[M"));
+    if (!term.quirks.utf8_encoded_mouse) {
+        return parseClassicMouse(in);
+    } else {
+        return parseDecset1005(in);
+    }
+}
+
+fn parseDecset1005(in: []const u8) Reply {
+    const btn = in[3];
+    const col = std.unicode.wtf8Decode(in[4..]) catch {
+        return malformedRead(4, in);
+    };
+    const r_idx = 4 + (std.unicode.utf8CodepointSequenceLength(col) catch {
+        return malformedRead(4, in); // Checks for overlong
+    });
+    const row = std.unicode.wtf8Decode(in[r_idx..]) catch {
+        return malformedRead(r_idx, in);
+    };
+    const rest_idx = r_idx + (std.unicode.utf8CodepointSequenceLength(row) catch {
+        return malformedRead(r_idx, in);
+    });
+    if (btn < 32 or col < 32 or row < 32) {
+        return malformedRead(rest_idx, in);
+    }
+    return parseMouseNumbers(
+        btn - 32,
+        @intCast(col - 32),
+        @intCast(row - 32),
+        .unknown,
+        in[rest_idx..],
+    );
+}
+
+fn parseClassicMouse(in: []const u8) Reply {
+    if (in.len < 6) {
+        return moreNeeded(false, in);
+    }
+    const btn = in[3];
+    const col = in[4];
+    const row = in[5];
+    if (btn < 32 or col < 32 or row < 32) {
+        return malformedRead(6, in);
+    }
+    return parseMouseNumbers(btn - 32, col - 32, row - 32, .unknown, in[6..]);
 }
 
 fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
@@ -518,6 +569,67 @@ fn parseParameter(T: type, seq: []const u8) ParameterError!struct { T, usize } {
     } else @panic("parseParameter called on non-numeric sequence");
 }
 
+const MouseReleaseStatus = enum {
+    pressed,
+    released,
+    unknown,
+};
+
+fn parseMouseNumbers(button: u8, col: u16, row: u16, press: MouseReleaseStatus, rest: []const u8) Reply {
+    const btn_mods: PackedMouseButton = @bitCast(button);
+    const mouse_press: MousePress = mouse_press: {
+        if (btn_mods.iswacky) {
+            switch (btn_mods.low) {
+                .mb1 => break :mouse_press .button_8,
+                .mb2 => break :mouse_press .button_9,
+                .mb3 => break :mouse_press .button_10,
+                .none => break :mouse_press .button_11,
+            }
+        } else if (btn_mods.iswheel) {
+            switch (btn_mods.low) {
+                .mb1 => break :mouse_press .wheel_up,
+                .mb2 => break :mouse_press .wheel_down,
+                .mb3 => break :mouse_press .wheel_left,
+                .none => break :mouse_press .wheel_right,
+            }
+        } else {
+            switch (btn_mods.low) {
+                .mb1 => break :mouse_press .button_1,
+                .mb2 => break :mouse_press .button_2,
+                .mb3 => break :mouse_press .button_3,
+                .none => break :mouse_press .none,
+            }
+        }
+    };
+    const mouse_mod: MouseModifier = mouse_mod: {
+        if (btn_mods.shift) {
+            break :mouse_mod .shift;
+        } else if (btn_mods.control) {
+            break :mouse_mod .control;
+        } else if (btn_mods.meta) {
+            break :mouse_mod .meta;
+        } else {
+            break :mouse_mod .none;
+        }
+    };
+    const mouse_released = switch (press) {
+        .released => true,
+        .pressed => false,
+        .unknown => if (btn_mods.motion and mouse_press == .none) false else true,
+    };
+    return Reply{
+        .status = .complete,
+        .report = TermReport{ .mouse = .{
+            .mod = mouse_mod,
+            .button = mouse_press,
+            .released = mouse_released,
+            .col = col,
+            .row = row,
+        } },
+        .rest = rest,
+    };
+}
+
 const CsiInfo = struct {
     /// Final byte
     byte: u8,
@@ -531,12 +643,8 @@ const CsiInfo = struct {
     valid: bool,
 };
 
-/// Verify the integrity of the CSI control sequence, returning the
-/// final byte. or throwing an `InvalidCSI` error if the string is
-/// not valid.  If the string is valid but no final byte is reached,
-/// return `null` (partial command).  An out parameter is provided to
-/// report the index of either an error or a found final byte.
-///
+/// Verify the integrity of the CSI control sequence, returning
+/// a `CsiInfo` containing the parsing results.
 /// References are to ECMA-48/1991.
 fn validateControlSequence(in: []const u8) ?CsiInfo {
     // §5.4.1b
@@ -620,27 +728,27 @@ fn special(key_type: KeyTag) TermReport {
 
 fn specialKey(key_type: KeyTag) Key {
     switch (key_type) {
-        .backspace => return Key{ .backspace = {} },
-        .enter => return Key{ .enter = {} },
-        .left => return Key{ .left = {} },
-        .right => return Key{ .right = {} },
-        .up => return Key{ .up = {} },
-        .down => return Key{ .down = {} },
-        .home => return Key{ .home = {} },
-        .end => return Key{ .end = {} },
-        .page_up => return Key{ .page_up = {} },
-        .page_down => return Key{ .page_down = {} },
-        .tab => return Key{ .tab = {} },
-        .back_tab => return Key{ .back_tab = {} },
-        .delete => return Key{ .delete = {} },
-        .insert => return Key{ .insert = {} },
-        .esc => return Key{ .esc = {} },
-        .caps_lock => return Key{ .caps_lock = {} },
-        .scroll_lock => return Key{ .scroll_lock = {} },
-        .num_lock => return Key{ .num_lock = {} },
-        .print_screen => return Key{ .print_screen = {} },
-        .pause => return Key{ .pause = {} },
-        .menu => return Key{ .menu = {} },
+        .backspace => return Key.backspace,
+        .enter => return Key.enter,
+        .left => return Key.left,
+        .right => return Key.right,
+        .up => return Key.up,
+        .down => return Key.down,
+        .home => return Key.home,
+        .end => return Key.end,
+        .page_up => return Key.page_up,
+        .page_down => return Key.page_down,
+        .tab => return Key.tab,
+        .back_tab => return Key.back_tab,
+        .delete => return Key.delete,
+        .insert => return Key.insert,
+        .esc => return Key.esc,
+        .caps_lock => return Key.caps_lock,
+        .scroll_lock => return Key.scroll_lock,
+        .num_lock => return Key.num_lock,
+        .print_screen => return Key.print_screen,
+        .pause => return Key.pause,
+        .menu => return Key.menu,
         .f, .char, .keypad, .media, .modifier => unreachable,
     }
 }
@@ -657,7 +765,7 @@ fn kpKey(key_type: KeyPadKey) Key {
     };
 }
 
-fn fKey(num: u21) TermReport {
+fn function(num: u21) TermReport {
     return TermReport{ .key = KeyReport{
         .value = Key{ .f = @intCast(num) },
     } };
@@ -907,10 +1015,10 @@ pub const InfoKind = enum {
 
 /// Type of mouse press reported.
 pub const MousePress = enum {
-    left,
-    middle,
-    right,
-    release,
+    button_1,
+    button_2,
+    button_3,
+    none,
     wheel_up,
     wheel_down,
     // Weirdo XTerm stuff
@@ -920,7 +1028,6 @@ pub const MousePress = enum {
     button_9,
     button_10,
     button_11,
-    none,
 };
 
 /// Modifier held during mouse report event.
@@ -928,7 +1035,24 @@ pub const MouseModifier = enum(u2) {
     none,
     shift,
     meta,
-    ctrl,
+    control,
+};
+
+const BtnEnum = enum(u2) {
+    mb1,
+    mb2,
+    mb3,
+    none,
+};
+
+const PackedMouseButton = packed struct(u8) {
+    low: BtnEnum,
+    shift: bool,
+    meta: bool,
+    control: bool,
+    motion: bool,
+    iswheel: bool,
+    iswacky: bool,
 };
 
 /// A report from the terminal regarding the mouse.
@@ -936,7 +1060,8 @@ pub const MouseReport = struct {
     button: MousePress,
     mod: MouseModifier,
     col: u16,
-    line: u16,
+    row: u16,
+    released: bool,
 };
 
 /// Type of key event.
