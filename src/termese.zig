@@ -217,6 +217,16 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
         return term.parseModifiedCsi(info, in);
     }
+    if (info.is_private_use) {
+        assert('<' <= in[2] and in[2] <= '?');
+        switch (in[2]) {
+            '<' => return parseDigitMouseEncodings(in, 1006),
+            '=' => {},
+            '>' => {},
+            '?' => {}, // Various sorts of réportage
+            else => unreachable,
+        }
+    }
     // Handle other CSI sequences we might see
     switch (b) {
         'M' => return parseDigitMouseEncodings(in, 1015),
@@ -230,16 +240,6 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
         },
         'R' => {}, // cursor origin report https://terminalguide.namepad.de/seq/csi_sn-6/
         else => return notRecognized(in[0..info.stop], rest),
-    }
-    if (info.is_private_use) {
-        assert('<' <= in[2] and in[2] <= '?');
-        switch (in[2]) {
-            '<' => return parseDigitMouseEncodings(in, 1006),
-            '=' => {},
-            '>' => {},
-            '?' => {}, // Various sorts of réportage
-            else => unreachable,
-        }
     }
     // Many options due to reporting of various sorts, TBD
     unreachable; // Will be..
@@ -412,7 +412,7 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
 }
 
 fn parseCsiMouse(term: *TermRead, in: []const u8) Reply {
-    assert(std.mem.eql(u8, in[0..2], "\x1b[M"));
+    assert(std.mem.eql(u8, in[0..3], "\x1b[M"));
     if (!term.quirks.utf8_encoded_mouse) {
         return parseClassicMouse(in);
     } else {
@@ -422,18 +422,20 @@ fn parseCsiMouse(term: *TermRead, in: []const u8) Reply {
 
 fn parseDecset1005(in: []const u8) Reply {
     const btn = in[3];
-    const col = std.unicode.wtf8Decode(in[4..]) catch {
+    const b1len = std.unicode.utf8ByteSequenceLength(in[4]) catch {
         return malformedRead(4, in);
     };
-    const r_idx = 4 + (std.unicode.utf8CodepointSequenceLength(col) catch {
-        return malformedRead(4, in); // Checks for overlong
-    });
+    const col = std.unicode.utf8Decode(in[4 .. 4 + b1len]) catch {
+        return malformedRead(4, in);
+    };
+    const r_idx: usize = 4 + b1len;
+    const b2len = std.unicode.utf8ByteSequenceLength(in[r_idx]) catch {
+        return malformedRead(4, in);
+    };
     const row = std.unicode.wtf8Decode(in[r_idx..]) catch {
         return malformedRead(r_idx, in);
     };
-    const rest_idx = r_idx + (std.unicode.utf8CodepointSequenceLength(row) catch {
-        return malformedRead(r_idx, in);
-    });
+    const rest_idx = r_idx + b2len;
     if (btn < 32 or col < 32 or row < 32) {
         return malformedRead(rest_idx, in);
     }
@@ -674,6 +676,7 @@ fn parseMouseNumbers(button: u8, col: u16, row: u16, press: MouseReleaseStatus, 
             .mod = mouse_mod,
             .button = mouse_press,
             .released = mouse_released,
+            .moving = btn_mods.motion,
             .col = col,
             .row = row,
         } },
@@ -702,7 +705,7 @@ fn validateControlSequence(in: []const u8) ?CsiInfo {
     const is_private_use = '<' <= in[2] and in[2] <= '?';
     if (is_private_use) return CsiInfo{
         .byte = 0xff,
-        .stop = 3,
+        .stop = 0, // Not used, would otherwise parse as a one-letter CSI
         .is_private_use = true,
         .has_intermediates = false,
         .valid = true, // So far as we know!
@@ -1065,7 +1068,7 @@ pub const InfoKind = enum {
 };
 
 /// Type of mouse press reported.
-pub const MousePress = enum {
+pub const MousePress = enum(u4) {
     button_1,
     button_2,
     button_3,
@@ -1112,6 +1115,7 @@ pub const MouseReport = struct {
     mod: MouseModifier,
     col: u16,
     row: u16,
+    moving: bool,
     released: bool,
 };
 
@@ -1565,4 +1569,55 @@ test "Associated Text" {
         \\    ""
         ,
     ).expectEqual(term.read("\x1b[97;13:2;945:946:947:948u"));
+}
+
+test "mouse reports" {
+    const oh = OhSnap{};
+    var term = TermRead{};
+    try oh.snap(@src(),
+        \\termese.MouseReport
+        \\  .button: termese.MousePress
+        \\    .button_2
+        \\  .mod: termese.MouseModifier
+        \\    .none
+        \\  .col: u16 = 33
+        \\  .row: u16 = 49
+        \\  .moving: bool = false
+        \\  .released: bool = true
+    ).expectEqual(term.read("\x1b[M!AQ").report.mouse);
+    term.quirks.utf8_encoded_mouse = true;
+    try oh.snap(@src(),
+        \\termese.MouseReport
+        \\  .button: termese.MousePress
+        \\    .button_1
+        \\  .mod: termese.MouseModifier
+        \\    .none
+        \\  .col: u16 = 916
+        \\  .row: u16 = 914
+        \\  .moving: bool = true
+        \\  .released: bool = true
+    ).expectEqual(term.read("\x1b[M@δβ").report.mouse);
+    term.quirks.utf8_encoded_mouse = false;
+    try oh.snap(@src(),
+        \\termese.MouseReport
+        \\  .button: termese.MousePress
+        \\    .button_2
+        \\  .mod: termese.MouseModifier
+        \\    .meta
+        \\  .col: u16 = 128
+        \\  .row: u16 = 132
+        \\  .moving: bool = true
+        \\  .released: bool = false
+    ).expectEqual(term.read("\x1b[<41;128;132M").report.mouse);
+    try oh.snap(@src(),
+        \\termese.MouseReport
+        \\  .button: termese.MousePress
+        \\    .button_2
+        \\  .mod: termese.MouseModifier
+        \\    .meta
+        \\  .col: u16 = 128
+        \\  .row: u16 = 132
+        \\  .moving: bool = true
+        \\  .released: bool = true
+    ).expectEqual(term.read("\x1b[<41;128;132m").report.mouse);
 }
