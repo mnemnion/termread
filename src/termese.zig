@@ -941,9 +941,7 @@ pub const TermReport = union(TermEventKind) {
     ) !void {
         switch (term_report) {
             .key => |k| {
-                try writer.writeAll("key: ");
-                try k.format(fmt, options, writer);
-                try writer.writeAll("\n");
+                try writer.print("key: {}\n", .{k});
             },
             .info => {
                 try writer.print("info: \n", .{});
@@ -951,8 +949,8 @@ pub const TermReport = union(TermEventKind) {
             .paste => {
                 try writer.print("paste: \n", .{});
             },
-            .mouse => {
-                try writer.print("mouse: \n", .{});
+            .mouse => |m| {
+                try writer.print("mouse: {}\n", .{m});
             },
             .more => {
                 try writer.print("more: \n", .{});
@@ -967,6 +965,8 @@ pub const TermReport = union(TermEventKind) {
                 try writer.print("malformed: \n", .{});
             },
         }
+        _ = fmt;
+        _ = options;
     }
 };
 
@@ -1117,6 +1117,36 @@ pub const MouseReport = struct {
     row: u16,
     moving: bool,
     released: bool,
+
+    pub fn format(
+        maus: MouseReport,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{s} {s} {d},{d} ", .{
+            @tagName(maus.mod),
+            @tagName(maus.button),
+            maus.col,
+            maus.row,
+        });
+        const other = maus.moving or maus.released;
+        if (other) {
+            try writer.writeByte('[');
+            if (maus.moving) {
+                try writer.writeAll("move");
+            }
+            if (maus.moving and maus.released) {
+                try writer.writeByte(',');
+            }
+            if (maus.released) {
+                try writer.writeAll("release");
+            }
+            try writer.writeByte(']');
+        }
+    }
 };
 
 /// Type of key event.
@@ -1512,21 +1542,33 @@ test "parsing" {
     }
     try oh.snap(
         @src(),
+        \\status: complete
+        \\key: Q
+        \\rest: 'z'
         \\
         ,
     ).showFmt(term.read("Qz"));
     try oh.snap(
         @src(),
+        \\status: complete
+        \\key: <A-<esc>>
+        \\rest: ''
         \\
         ,
     ).showFmt(term.read("\x1b\x1b"));
     try oh.snap(
         @src(),
+        \\status: complete
+        \\key: <S-A-a>
+        \\rest: ''
         \\
         ,
     ).showFmt(term.read("\x1b[97;4u"));
     try oh.snap(
         @src(),
+        \\status: complete
+        \\key: <down>
+        \\rest: '7;4u'
         \\
         ,
     ).showFmt(term.read("\x1b[B7;4u"));
@@ -1620,4 +1662,18 @@ test "mouse reports" {
         \\  .moving: bool = true
         \\  .released: bool = true
     ).expectEqual(term.read("\x1b[<41;128;132m").report.mouse);
+    try oh.snap(@src(),
+        \\termese.MouseReport
+        \\  .button: termese.MousePress
+        \\    .button_2
+        \\  .mod: termese.MouseModifier
+        \\    .meta
+        \\  .col: u16 = 96
+        \\  .row: u16 = 100
+        \\  .moving: bool = false
+        \\  .released: bool = true
+    ).expectEqual(term.read("\x1b[41;128;132M").report.mouse);
+    try oh.snap(@src(),
+        \\meta button_2 128,132 [move,release]
+    ).showFmt(term.read("\x1b[<41;128;132m").report.mouse);
 }
