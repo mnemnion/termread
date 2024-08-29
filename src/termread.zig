@@ -1584,13 +1584,13 @@ test "Associated Text" {
     var term = TermRead{};
     try oh.snap(
         @src(),
-        \\termese.Reply
-        \\  .status: termese.ReadStatus
+        \\termread.Reply
+        \\  .status: termread.ReadStatus
         \\    .complete
-        \\  .report: termese.TermReport
-        \\    .associated_text: termese.AssociatedTextReport
-        \\      .key: termese.KeyReport
-        \\        .mod: termese.KeyMod
+        \\  .report: termread.TermReport
+        \\    .associated_text: termread.AssociatedTextReport
+        \\      .key: termread.KeyReport
+        \\        .mod: termread.KeyMod
         \\          .shift: bool = false
         \\          .alt: bool = false
         \\          .control: bool = true
@@ -1599,9 +1599,9 @@ test "Associated Text" {
         \\          .meta: bool = false
         \\          .capslock: bool = false
         \\          .numlock: bool = false
-        \\        .value: termese.Key
+        \\        .value: termread.Key
         \\          .char: u21 = 97
-        \\        .event: termese.KeyEvent
+        \\        .event: termread.KeyEvent
         \\          .repeat
         \\        .shifted: u21 = 0
         \\        .base_key: u21 = 0
@@ -1617,10 +1617,10 @@ test "mouse reports" {
     const oh = OhSnap{};
     var term = TermRead{};
     try oh.snap(@src(),
-        \\termese.MouseReport
-        \\  .button: termese.MousePress
+        \\termread.MouseReport
+        \\  .button: termread.MousePress
         \\    .button_2
-        \\  .mod: termese.MouseModifier
+        \\  .mod: termread.MouseModifier
         \\    .none
         \\  .col: u16 = 33
         \\  .row: u16 = 49
@@ -1629,10 +1629,10 @@ test "mouse reports" {
     ).expectEqual(term.read("\x1b[M!AQ").report.mouse);
     term.quirks.utf8_encoded_mouse = true;
     try oh.snap(@src(),
-        \\termese.MouseReport
-        \\  .button: termese.MousePress
+        \\termread.MouseReport
+        \\  .button: termread.MousePress
         \\    .button_1
-        \\  .mod: termese.MouseModifier
+        \\  .mod: termread.MouseModifier
         \\    .none
         \\  .col: u16 = 916
         \\  .row: u16 = 914
@@ -1641,10 +1641,10 @@ test "mouse reports" {
     ).expectEqual(term.read("\x1b[M@δβ").report.mouse);
     term.quirks.utf8_encoded_mouse = false;
     try oh.snap(@src(),
-        \\termese.MouseReport
-        \\  .button: termese.MousePress
+        \\termread.MouseReport
+        \\  .button: termread.MousePress
         \\    .button_2
-        \\  .mod: termese.MouseModifier
+        \\  .mod: termread.MouseModifier
         \\    .meta
         \\  .col: u16 = 128
         \\  .row: u16 = 132
@@ -1652,10 +1652,10 @@ test "mouse reports" {
         \\  .released: bool = false
     ).expectEqual(term.read("\x1b[<41;128;132M").report.mouse);
     try oh.snap(@src(),
-        \\termese.MouseReport
-        \\  .button: termese.MousePress
+        \\termread.MouseReport
+        \\  .button: termread.MousePress
         \\    .button_2
-        \\  .mod: termese.MouseModifier
+        \\  .mod: termread.MouseModifier
         \\    .meta
         \\  .col: u16 = 128
         \\  .row: u16 = 132
@@ -1663,10 +1663,10 @@ test "mouse reports" {
         \\  .released: bool = true
     ).expectEqual(term.read("\x1b[<41;128;132m").report.mouse);
     try oh.snap(@src(),
-        \\termese.MouseReport
-        \\  .button: termese.MousePress
+        \\termread.MouseReport
+        \\  .button: termread.MousePress
         \\    .button_2
-        \\  .mod: termese.MouseModifier
+        \\  .mod: termread.MouseModifier
         \\    .meta
         \\  .col: u16 = 96
         \\  .row: u16 = 100
