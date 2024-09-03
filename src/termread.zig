@@ -239,6 +239,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
             }
         },
         'R' => {}, // cursor origin report https://terminalguide.namepad.de/seq/csi_sn-6/
+        't' => {}, // Terminal Reports
         else => return notRecognized(in[0..info.stop], rest),
     }
     // Many options due to reporting of various sorts, TBD
@@ -586,6 +587,23 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
         'S' => return Reply.ok(modKey(modifier, Key{ .f = 4 }), rest),
         else => unreachable, // We checked this at function entrance
     }
+}
+
+fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
+    assert(std.mem.eql(u8, in[0..2], "\x1b["));
+    assert(info.byte == 't');
+    switch (in[2]) {
+        '1' => {}, // Terminal not minimized
+        '2' => {}, // Terminal minimized
+        '3' => {}, // Window position https://terminalguide.namepad.de/seq/csi_st-13/
+        '4' => {}, // Terminal size, pixels https://terminalguide.namepad.de/seq/csi_st-14/
+        '5' => {}, // Screen size, pixels https://terminalguide.namepad.de/seq/csi_st-15/
+        '6' => {}, // Cell size, pixels https://terminalguide.namepad.de/seq/csi_st-16/
+        '8' => {}, // Terminal size, cells https://terminalguide.namepad.de/seq/csi_st-18/
+        '9' => {}, // Screen size, cells (??) https://terminalguide.namepad.de/seq/csi_st-18/
+
+    }
+    _ = term;
 }
 
 fn parseText(term: *TermRead, in: []const u8) Reply {
@@ -970,9 +988,31 @@ pub const TermReport = union(TermEventKind) {
     }
 };
 
-pub const InfoReport = struct {
-    string: []const u8,
-}; // TODO: Stub
+/// Terminal event reporting information of one sort or another.
+pub const InfoReport = union(InfoKind) {
+    unknown: struct {
+        sequence: []const u8,
+    },
+    operating: void,
+    cursor_position: struct {
+        col: u16,
+        row: u16,
+    },
+    cell_size_pixels: struct {
+        height: u16,
+        width: u16,
+    },
+    terminal_size_cells: struct {
+        height: u16,
+        width: u16,
+    },
+    terminal_size_pixels: struct {
+        height: u16,
+        width: u16,
+    },
+    terminal_window_state: bool,
+    cursor_style: void,
+};
 
 pub const Paste = struct {
     string: []const u8,
@@ -1061,8 +1101,10 @@ pub const InfoKind = enum {
     unknown,
     operating,
     cursor_position,
-    cell_size,
-    pixel_size,
+    cell_size_pixels,
+    terminal_size_cells,
+    terminal_size_pixels,
+    terminal_window_state,
     cursor_style,
     // There's a lot of these...
 };
