@@ -124,6 +124,7 @@ fn parseEsc(term: *TermRead, in: []const u8) Reply {
     switch (in[1]) {
         'O' => return term.parseSs3(in),
         '[' => return term.parseCsi(in),
+        ']' => {}, // OSC
         0x1b => { // Legacy Alt-Esc
             return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
         },
