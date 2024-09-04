@@ -596,12 +596,60 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
         '1' => {}, // Terminal not minimized
         '2' => {}, // Terminal minimized
         '3' => {}, // Window position https://terminalguide.namepad.de/seq/csi_st-13/
-        '4' => {}, // Terminal size, pixels https://terminalguide.namepad.de/seq/csi_st-14/
-        '5' => {}, // Screen size, pixels https://terminalguide.namepad.de/seq/csi_st-15/
-        '6' => {}, // Cell size, pixels https://terminalguide.namepad.de/seq/csi_st-16/
-        '8' => {}, // Terminal size, cells https://terminalguide.namepad.de/seq/csi_st-18/
-        '9' => {}, // Screen size, cells (??) https://terminalguide.namepad.de/seq/csi_st-18/
-
+        '4', '5', '6', '8', '9' => |kind| {
+            var idx = 3;
+            if (in[idx] != ';') return malformedRead(idx, in);
+            idx += 1;
+            const height, var idx_delta = parseParameter(u16, in[idx..]) catch {
+                return malformedRead(idx, in);
+            };
+            idx += idx_delta;
+            if (in[idx] != ';') return malformedRead(idx, in);
+            idx += 1;
+            const width, idx_delta = parseParameter(u16, idx + 1) catch {
+                return malformedRead(idx, in);
+            };
+            idx += idx_delta;
+            if (in[idx] != 't') return malformedRead(idx, in);
+            const i_report = switch (kind) {
+                '4' => InfoReport{
+                    .terminal_size_pixels = .{
+                        .height = height,
+                        .width = width,
+                    },
+                },
+                '5' => InfoReport{
+                    .screen_size_pixels = .{
+                        .height = height,
+                        .width = width,
+                    },
+                },
+                '6' => InfoReport{
+                    .cell_size_pixels = .{
+                        .height = height,
+                        .width = width,
+                    },
+                },
+                '8' => InfoReport{
+                    .terminal_size_cells = .{
+                        .height = height,
+                        .width = width,
+                    },
+                },
+                '9' => InfoReport{
+                    .screen_size_cells = .{
+                        .height = height,
+                        .width = width,
+                    },
+                },
+                else => unreachable,
+            };
+            return Reply{
+                .status = .complete,
+                .report = i_report,
+                .rest = in[idx + 1 ..],
+            };
+        },
     }
     _ = term;
 }
