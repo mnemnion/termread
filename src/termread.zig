@@ -520,10 +520,15 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
     const rest = in[info.stop..];
-    if (info.byte == '~') { // Legacy special keys
+    if (info.byte == '~') { // Legacy special keys + paste
         const keyval, const idx_delta = parseParameter(u21, in[2..]) catch {
             return malformedRead(info.stop, in);
         };
+        if (keyval == 200) {
+            if (in[2 + idx_delta] == '~') {
+                // return parsePasteBracket(term, in);
+            }
+        }
         var modifier: KeyMod = mod();
         if (in[2 + idx_delta] == ';') {
             var mod_val, _ = parseParameter(u9, in[3 + idx_delta ..]) catch {
@@ -588,6 +593,33 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
         'S' => return Reply.ok(modKey(modifier, Key{ .f = 4 }), rest),
         else => unreachable, // We checked this at function entrance
     }
+}
+
+fn parsePasteBracket(term: *TermRead, in: []const u8) Reply {
+    // ESC [ 2 0 0 ~ == index 5
+    _ = term;
+    assert(in[5] == '~');
+    // Escape sequences in a paste can cause problems, so we
+    // report them when included.
+    var has_esc = false;
+    var idx = 6;
+    while (idx < in.len) : (idx += 1) {
+        if (in[idx] == '\x1b') {
+            if (std.mem.eql(u8, "\x1b[201~", in[idx .. idx + 6])) {
+                return Reply{
+                    .status = .complete,
+                    .report = PasteReport{
+                        .string = in[6..idx],
+                        .has_esc = has_esc,
+                    },
+                    .rest = in[idx + 6 ..],
+                };
+            } else {
+                has_esc = true;
+            }
+        }
+    }
+    return moreNeeded(true, in);
 }
 
 fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
@@ -1051,7 +1083,7 @@ pub const TermEventKind = enum(u4) {
 pub const TermReport = union(TermEventKind) {
     key: KeyReport,
     info: InfoReport,
-    paste: Paste,
+    paste: PasteReport,
     mouse: MouseReport,
     more: MoreReport,
     associated_text: AssociatedTextReport,
@@ -1126,9 +1158,10 @@ pub const InfoReport = union(InfoKind) {
     cursor_style: void,
 };
 
-pub const Paste = struct {
+pub const PasteReport = struct {
     string: []const u8,
-}; // TODO: Stub (albeit a fairly complete one)
+    has_esc: bool,
+};
 
 pub const MoreReport = struct {
     is_paste: bool,
