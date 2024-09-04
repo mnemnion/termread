@@ -589,14 +589,65 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     }
 }
 
+fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
+    _ = term;
+    assert(std.mem.eql(u8, in[0..2], "\x1b["));
+    assert(info.byte == 'R');
+    var idx = 2;
+    const row, var idx_delta = parseParameter(u16, in[idx..]) catch {
+        return malformedRead(info.stop, in);
+    };
+    idx += idx_delta;
+    if (in[idx] != ';') return malformedRead(info.stop, in);
+    idx += 1;
+    const col, idx_delta = parseParameter(u16, idx + 1) catch {
+        return malformedRead(info.stop, in);
+    };
+    idx += idx_delta;
+    if (in[idx] == ';') {
+        idx += 1;
+        if (in[idx] != '1') return notRecognized(in[0..info.stop], in[info.stop..]);
+        idx += 1;
+    }
+    if (in[idx] != 'R') return notRecognized(in[0..info.stop], in[info.stop..]);
+    idx += 1;
+    return Reply{
+        .status = .complete,
+        .report = InfoReport{
+            .cursor_position = .{
+                .row = row,
+                .col = col,
+            },
+        },
+        .rest = in[idx..],
+    };
+}
+
 fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     assert(std.mem.eql(u8, in[0..2], "\x1b["));
     assert(info.byte == 't');
     switch (in[2]) {
-        '1' => {}, // Terminal not minimized
-        '2' => {}, // Terminal minimized
-        '3' => {}, // Window position https://terminalguide.namepad.de/seq/csi_st-13/
-        '4', '5', '6', '8', '9' => |kind| {
+        '1' => {
+            if (in[3] != 't') return notRecognized(in[0..info.stop], in[info.stop..]);
+            return Reply{
+                .status = .complete,
+                .report = InfoReport{
+                    .is_minimized = false,
+                },
+                .rest = in[info.stop..],
+            };
+        },
+        '2' => {
+            if (in[3] != 't') return notRecognized(in[0..info.stop], in[info.stop..]);
+            return Reply{
+                .status = .complete,
+                .report = InfoReport{
+                    .is_minimized = true,
+                },
+                .rest = in[info.stop..],
+            };
+        },
+        '3', '4', '5', '6', '8', '9' => |kind| {
             var idx = 3;
             if (in[idx] != ';') return malformedRead(idx, in);
             idx += 1;
@@ -612,6 +663,12 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             idx += idx_delta;
             if (in[idx] != 't') return malformedRead(idx, in);
             const i_report = switch (kind) {
+                '3' => InfoReport{
+                    .terminal_position = .{
+                        .x = @bitCast(height),
+                        .y = @bitCast(width),
+                    },
+                },
                 '4' => InfoReport{
                     .terminal_size_pixels = .{
                         .height = height,
@@ -650,6 +707,7 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
                 .rest = in[idx + 1 ..],
             };
         },
+        else => return notRecognized(in[0..info.stop], in[info.stop..]),
     }
     _ = term;
 }
@@ -1042,9 +1100,14 @@ pub const InfoReport = union(InfoKind) {
         sequence: []const u8,
     },
     operating: void,
+    is_minimized: bool,
     cursor_position: struct {
-        col: u16,
         row: u16,
+        col: u16,
+    },
+    terminal_position: struct {
+        x: i16,
+        y: i16,
     },
     cell_size_pixels: struct {
         height: u16,
@@ -1148,7 +1211,9 @@ pub const KeyReport = struct {
 pub const InfoKind = enum {
     unknown,
     operating,
+    is_minimized,
     cursor_position,
+    terminal_position,
     cell_size_pixels,
     terminal_size_cells,
     terminal_size_pixels,
