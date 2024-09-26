@@ -352,6 +352,8 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
     // This is unreasonable, so we set a sensible limit.
     // Tracking issue: https://github.com/kovidgoyal/kitty/issues/7749
     //
+    // Lol. Lmao.
+    //
     // Rather than allow a brain-damaged specification to DoS your
     // program by spamming unlimited associated text, this library
     // has decided to accept a generous buffer of up to 24 codepoints
@@ -681,7 +683,7 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             };
         },
         '3', '4', '5', '6', '8', '9' => |kind| {
-            var idx = 3;
+            var idx: usize = 3;
             if (in[idx] != ';') return malformedRead(idx, in);
             idx += 1;
             const height, var idx_delta = parseParameter(u16, in[idx..]) catch {
@@ -1100,8 +1102,8 @@ pub const TermReport = union(TermEventKind) {
             .key => |k| {
                 try writer.print("key: {}\n", .{k});
             },
-            .info => {
-                try writer.print("info: \n", .{});
+            .info => |i| {
+                try writer.print("info: {} \n", .{i});
             },
             .paste => {
                 try writer.print("paste: \n", .{});
@@ -1147,15 +1149,62 @@ pub const InfoReport = union(InfoKind) {
         width: u16,
     },
     terminal_size_cells: struct {
-        height: u16,
-        width: u16,
+        rows: u16,
+        cols: u16,
     },
     terminal_size_pixels: struct {
         height: u16,
         width: u16,
     },
-    terminal_window_state: bool,
     cursor_style: void,
+
+    pub fn format(
+        info_report: InfoReport,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        switch (info_report) {
+            .unknown => |un| {
+                try writer.print("unknown sequence: {s}", .{un.sequence});
+            },
+            .operating => try writer.writeAll("terminal is operating \n"),
+            .is_minimized => |min| {
+                if (min) {
+                    try writer.writeAll("terminal is minimized\n");
+                } else {
+                    try writer.writeAll("terminal is not minimized\n");
+                }
+            },
+            .cursor_position => |cpos| {
+                try writer.print("cursor at [{d}, {d}]\n", .{ cpos.row, cpos.col });
+            },
+            .terminal_position => |tpos| {
+                try writer.print("terminal at [{d}, {d}]\n", .{ tpos.x, tpos.y });
+            },
+            .cell_size_pixels => |cell_pix| {
+                try writer.print(
+                    "pixel size of cells: height {d}, width {d}\n",
+                    .{ cell_pix.height, cell_pix.width },
+                );
+            },
+            .terminal_size_cells => |term_cell| {
+                try writer.print(
+                    "terminal size in cells: {d} rows, {d} columns",
+                    .{ term_cell.rows, term_cell.cols },
+                );
+            },
+            .terminal_size_pixels => |term_pix| {
+                try writer.print(
+                    "terminal size in pixels: height {d}, width {d}\n",
+                    .{ term_pix.height, term_pix.width },
+                );
+            },
+            .cursor_style => {},
+        }
+        _ = fmt;
+        _ = options;
+    }
 };
 
 pub const PasteReport = struct {
@@ -1251,7 +1300,6 @@ pub const InfoKind = enum {
     cell_size_pixels,
     terminal_size_cells,
     terminal_size_pixels,
-    terminal_window_state,
     cursor_style,
     // There's a lot of these...
 };
