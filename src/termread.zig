@@ -1105,17 +1105,18 @@ pub const TermReport = union(TermEventKind) {
             .info => |i| {
                 try writer.print("info: {} \n", .{i});
             },
-            .paste => {
-                try writer.print("paste: \n", .{});
+            .paste => |p| {
+                // TODO: sensible formatting here and elsewhere
+                try writer.print("pasted: {s} \n", .{p.string});
             },
             .mouse => |m| {
                 try writer.print("mouse: {}\n", .{m});
             },
             .more => {
-                try writer.print("more: \n", .{});
+                try writer.print("more needed. \n", .{});
             },
-            .associated_text => {
-                try writer.print("associated text: \n", .{});
+            .associated_text => |at| {
+                try writer.print("associated text: \n", .{at});
             },
             .unrecognized => {
                 try writer.print("unrecognized: \n", .{});
@@ -1156,7 +1157,10 @@ pub const InfoReport = union(InfoKind) {
         height: u16,
         width: u16,
     },
-    cursor_style: void,
+    cursor_style: struct {
+        style: CursorStyle,
+        blinking: bool,
+    },
 
     pub fn format(
         info_report: InfoReport,
@@ -1200,7 +1204,10 @@ pub const InfoReport = union(InfoKind) {
                     .{ term_pix.height, term_pix.width },
                 );
             },
-            .cursor_style => {},
+            .cursor_style => |c_style| {
+                const blink = if (c_style.blinking) "blinking " else "";
+                try writer.print("{s}{s} cursor\n", .{ blink, @tagName(c_style.style) });
+            },
         }
         _ = fmt;
         _ = options;
@@ -1227,6 +1234,18 @@ pub const MalformedReport = struct {
 pub const AssociatedTextReport = struct {
     key: KeyReport,
     text: []const u8,
+
+    pub fn format(
+        text_report: AssociatedTextReport,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.write("key: {}\n", .{text_report.key});
+        try writer.write("with text: {s}\n", .{text_report.text});
+        _ = fmt;
+        _ = options;
+    }
 };
 
 pub const KeyReport = struct {
@@ -1302,6 +1321,12 @@ pub const InfoKind = enum {
     terminal_size_pixels,
     cursor_style,
     // There's a lot of these...
+};
+
+pub const CursorStyle = enum {
+    block,
+    steady,
+    underline,
 };
 
 /// Type of mouse press reported.
