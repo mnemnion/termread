@@ -247,7 +247,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
                 return notRecognized(in[0..info.stop], rest);
             }
         },
-        'R' => {}, // cursor origin report https://terminalguide.namepad.de/seq/csi_sn-6/
+        'R' => return term.parseCursorInfo(info, in),
         't' => {}, // Terminal Reports
         else => return notRecognized(in[0..info.stop], rest),
     }
@@ -630,7 +630,7 @@ fn parsePasteBracket(term: *TermRead, in: []const u8, more: bool) Reply {
     // Escape sequences in a paste can cause problems, so we
     // report them when included.
     var has_esc = false;
-    const start_idx = if (more) 0 else 6;
+    const start_idx: usize = if (more) 0 else 6;
     var idx = start_idx;
     while (idx < in.len) : (idx += 1) {
         if (in[idx] == '\x1b') {
@@ -638,9 +638,11 @@ fn parsePasteBracket(term: *TermRead, in: []const u8, more: bool) Reply {
                 term.await_paste = false;
                 return Reply{
                     .status = .complete,
-                    .report = PasteReport{
-                        .string = in[start_idx..idx],
-                        .has_esc = has_esc,
+                    .report = .{
+                        .paste = .{
+                            .string = in[start_idx..idx],
+                            .has_esc = has_esc,
+                        },
                     },
                     .rest = in[idx + 6 ..],
                 };
@@ -652,10 +654,12 @@ fn parsePasteBracket(term: *TermRead, in: []const u8, more: bool) Reply {
     term.await_paste = true;
     return Reply{
         .status = .complete,
-        .report = PasteReport{
-            .string = in[start_idx..idx],
-            .has_esc = has_esc,
-            .partial = true,
+        .report = .{
+            .paste = .{
+                .string = in[start_idx..idx],
+                .has_esc = has_esc,
+                .partial = true,
+            },
         },
         .rest = in[idx..],
     };
@@ -665,17 +669,18 @@ fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     _ = term;
     assert(std.mem.eql(u8, in[0..2], "\x1b["));
     assert(info.byte == 'R');
-    var idx = 2;
+    var idx: usize = 2;
     const row, var idx_delta = parseParameter(u16, in[idx..]) catch {
         return malformedRead(info.stop, in);
     };
     idx += idx_delta;
     if (in[idx] != ';') return malformedRead(info.stop, in);
     idx += 1;
-    const col, idx_delta = parseParameter(u16, idx + 1) catch {
+    const col, idx_delta = parseParameter(u16, in[idx..]) catch {
         return malformedRead(info.stop, in);
     };
     idx += idx_delta;
+    // Variant form has ;1R
     if (in[idx] == ';') {
         idx += 1;
         if (in[idx] != '1') return notRecognized(in[0..info.stop], in[info.stop..]);
@@ -685,10 +690,12 @@ fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     idx += 1;
     return Reply{
         .status = .complete,
-        .report = InfoReport{
-            .cursor_position = .{
-                .row = row,
-                .col = col,
+        .report = .{
+            .info = .{
+                .cursor_position = .{
+                    .row = row,
+                    .col = col,
+                },
             },
         },
         .rest = in[idx..],
@@ -703,8 +710,8 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             if (in[3] != 't') return notRecognized(in[0..info.stop], in[info.stop..]);
             return Reply{
                 .status = .complete,
-                .report = InfoReport{
-                    .is_minimized = false,
+                .report = .{
+                    .info = .{ .is_minimized = false },
                 },
                 .rest = in[info.stop..],
             };
@@ -713,8 +720,8 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             if (in[3] != 't') return notRecognized(in[0..info.stop], in[info.stop..]);
             return Reply{
                 .status = .complete,
-                .report = InfoReport{
-                    .is_minimized = true,
+                .report = .{
+                    .info = .{ .is_minimized = true },
                 },
                 .rest = in[info.stop..],
             };
@@ -1153,7 +1160,7 @@ pub const TermReport = union(TermEventKind) {
                 try writer.print("more needed. \n", .{});
             },
             .associated_text => |at| {
-                try writer.print("associated text: \n", .{at});
+                try writer.print("associated text: {} \n", .{at});
             },
             .unrecognized => {
                 try writer.print("unrecognized: \n", .{});
@@ -1279,8 +1286,8 @@ pub const AssociatedTextReport = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try writer.write("key: {}\n", .{text_report.key});
-        try writer.write("with text: {s}\n", .{text_report.text});
+        try writer.print("key: {}\n", .{text_report.key});
+        try writer.print("with text: {s}\n", .{text_report.text});
         _ = fmt;
         _ = options;
     }
@@ -1355,32 +1362,32 @@ pub const KeyReport = struct {
     pub const onlyHyper = KeyMod{ .hyper = true };
     pub const onlySuper = KeyMod{ .super = true };
 
-    pub fn noMods(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == 0;
+    pub fn noMods(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == 0;
     }
 
-    pub fn justShift(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyShift));
+    pub fn justShift(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlyShift));
     }
 
-    pub fn justControl(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyControl));
+    pub fn justControl(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlyControl));
     }
 
-    pub fn justAlt(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyAlt));
+    pub fn justAlt(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlyAlt));
     }
 
-    pub fn justMeta(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyMeta));
+    pub fn justMeta(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlyMeta));
     }
 
-    pub fn justHyper(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyHyper));
+    pub fn justHyper(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlyHyper));
     }
 
-    pub fn justSuper(key: KeyMod) bool {
-        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlySuper));
+    pub fn justSuper(key: KeyReport) bool {
+        return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlySuper));
     }
 };
 
