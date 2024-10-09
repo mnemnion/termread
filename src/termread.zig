@@ -1345,6 +1345,43 @@ pub const KeyReport = struct {
         }
         if (is_modded) try writer.writeAll(">");
     }
+
+    // Template modifiers for easier detection using e.g. justControl
+
+    pub const onlyShift = KeyMod{ .shift = true };
+    pub const onlyControl = KeyMod{ .control = true };
+    pub const onlyAlt = KeyMod{ .alt = true };
+    pub const onlyMeta = KeyMod{ .meta = true };
+    pub const onlyHyper = KeyMod{ .hyper = true };
+    pub const onlySuper = KeyMod{ .super = true };
+
+    pub fn noMods(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == 0;
+    }
+
+    pub fn justShift(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyShift));
+    }
+
+    pub fn justControl(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyControl));
+    }
+
+    pub fn justAlt(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyAlt));
+    }
+
+    pub fn justMeta(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyMeta));
+    }
+
+    pub fn justHyper(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlyHyper));
+    }
+
+    pub fn justSuper(key: KeyMod) bool {
+        return @as(u8, @intCast(key.mod)) == @as(u8, @intCast(onlySuper));
+    }
 };
 
 /// Category of info reported.
