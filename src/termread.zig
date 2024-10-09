@@ -59,6 +59,10 @@ buffer: [BUF_SIZE]u8 = .{0x20} ** BUF_SIZE,
 /// allocated.  Private, do not modify.
 buf_len: usize = 0,
 
+/// Flag set when awaiting more of a long paste, which may not be read
+/// in a single go-around.
+await_paste: bool = false,
+
 const TermRead = @This();
 
 /// Configure Termese to recognize known quirks in terminal reporting.
@@ -79,6 +83,9 @@ pub const Quirks = packed struct(u8) {
 /// the status of the read, the report, and the remainder of the in
 /// buffer.
 pub fn read(term: *TermRead, in: []const u8) Reply {
+    if (term.await_paste) {
+        return term.parsePasteBracket(in, true);
+    }
     switch (in[0]) {
         // NUL is legacy for Ctrl-Space.
         0 => return Reply.ok(modText(mod().Control(), ' '), in[1..]),
@@ -228,6 +235,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
             else => unreachable,
         }
     }
+    if ('0' <= b and b <= '9') return term.parseCsiDigit(in, info);
     // Handle other CSI sequences we might see
     switch (b) {
         'M' => return parseDigitMouseEncodings(in, 1015),
@@ -244,7 +252,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
         else => return notRecognized(in[0..info.stop], rest),
     }
     // Many options due to reporting of various sorts, TBD
-    unreachable; // Will be..
+    return notRecognized(in[0..info.stop], rest);
 }
 
 const UTF_MAX = 0x10ffff;
@@ -413,6 +421,25 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
         },
         .rest = rest,
     };
+}
+
+fn parseCsiDigit(term: *TermRead, in: []const u8, info: CsiInfo) Reply {
+    assert(in[0] == '\x1b');
+    assert(in[1] == '[');
+    switch (in[2]) {
+        // TODO: surely some of these mean something.
+        '1', '3', '4', '5', '6', '7', '8', '9' => {
+            return notRecognized(in[0..info.stop], in[info.stop..]);
+        },
+        '2' => {
+            if (in.len >= 6 and in[3] == '0' and in[4] == '0' and in[5] == '~') {
+                return term.parsePasteBracket(in, false);
+            } else {
+                return notRecognized(in[0..info.stop], in[info.stop..]);
+            }
+        },
+        else => unreachable,
+    }
 }
 
 fn parseCsiMouse(term: *TermRead, in: []const u8) Reply {
@@ -597,21 +624,22 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     }
 }
 
-fn parsePasteBracket(term: *TermRead, in: []const u8) Reply {
+fn parsePasteBracket(term: *TermRead, in: []const u8, more: bool) Reply {
     // ESC [ 2 0 0 ~ == index 5
-    _ = term;
-    assert(in[5] == '~');
+    if (!more) assert(in[5] == '~');
     // Escape sequences in a paste can cause problems, so we
     // report them when included.
     var has_esc = false;
-    var idx = 6;
+    const start_idx = if (more) 0 else 6;
+    var idx = start_idx;
     while (idx < in.len) : (idx += 1) {
         if (in[idx] == '\x1b') {
             if (std.mem.eql(u8, "\x1b[201~", in[idx .. idx + 6])) {
+                term.await_paste = false;
                 return Reply{
                     .status = .complete,
                     .report = PasteReport{
-                        .string = in[6..idx],
+                        .string = in[start_idx..idx],
                         .has_esc = has_esc,
                     },
                     .rest = in[idx + 6 ..],
@@ -621,7 +649,16 @@ fn parsePasteBracket(term: *TermRead, in: []const u8) Reply {
             }
         }
     }
-    return moreNeeded(true, in);
+    term.await_paste = true;
+    return Reply{
+        .status = .complete,
+        .report = PasteReport{
+            .string = in[start_idx..idx],
+            .has_esc = has_esc,
+            .partial = true,
+        },
+        .rest = in[idx..],
+    };
 }
 
 fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
@@ -1217,6 +1254,7 @@ pub const InfoReport = union(InfoKind) {
 pub const PasteReport = struct {
     string: []const u8,
     has_esc: bool,
+    partial: bool = false,
 };
 
 pub const MoreReport = struct {
