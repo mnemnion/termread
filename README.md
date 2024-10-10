@@ -31,7 +31,13 @@ What about Termwrite?  Yeah... maybe.  The domain doesn't generalize as well.
 
 Termread assumes that the terminal is set to raw mode.  All setup and teardown is the responsibility of the host program.
 
-The library is non-allocating.  A `TermRead` struct contains a small buffer which is adequate to translate terminal reports to a useful form, and this will be overwritten on the next read which needs to make use of it.  Other reporting will have a slice, this is a view into the read buffer.  Should you find it necessary, you can call `try term_report.toOwned(allocator)`, which will duplicate any views and return a copy of the TermReport which owns the memory outright, this is a no-op on many reports, but harmless.  Similarly, `term_report.deinit(allocator)` will dispose of owned memory, if there is any: this is only safe to call on owned term reports, but also resolves to a no-op when there's nothing to deinit.
+The library is non-allocating.  A `TermRead` struct contains a small buffer which is adequate to translate terminal reports to a useful form, and this will be overwritten on the next read which needs to make use of it.  Other reporting will have a slice, this is a view into the read buffer.  Should you find it necessary, you can call `try term_report.toOwned(allocator)`, which will duplicate any views and return a copy of the TermReport which owns the memory outright, this is a no-op on many reports, but harmless.  Similarly, `term_report.deinit(allocator)` will dispose of owned memory, if there is any: this is only safe to call on term reports returned by `toOwned`, but will resolve to a no-op when there's nothing to deinit.
+
+Termread returns a `Reply`, with a `status` field which should be `.complete`, the `TermReport` on the `report` field, and `rest` which returns the unread part of the buffer, in case you want to call it again right away.
+
+Termread is very slightly stateful, in that bracketed pasting puts it in an `await_paste` mode when it reads the beginning of a paste, but not the end.  If your program has some sort of reset or redraw screen command, you may wish to add `term.await_paste = false;` to that command, in case is has gotten stuck in the wrong state.
+
+Termread has a scoped logger `.termread`, but does not ordinarily use it.  If you call `term.debugRead` it will do the same thing as calling `read`, but also log each `Reply` at the debug level.  This leaves off the `rest` field, which can be arbitrarily long and doesn't necessarily have printable data in it.
 
 ## Roadmap
 

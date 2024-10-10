@@ -44,6 +44,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const logger = std.log.scoped(.termread);
+
 // NOTE: must always be greater than MAX_ASSOCIATED_TEXT * 4
 const BUF_SIZE = 116;
 // Maximum number of 'associated text' codepoints to decode.
@@ -78,6 +80,14 @@ pub const Quirks = packed struct(u8) {
     /// Reserved for other quirks.
     reserved: u5 = 0,
 };
+
+/// A reader which debug logs each `Reply`.
+/// Scoped to `.termread`
+pub fn debugRead(term: *TermRead, in: []const u8) Reply {
+    const reply = term.read(in);
+    logger.debug.log("status: {s}\n{}\n", .{ @tagName(reply.status), reply.report });
+    return reply;
+}
 
 /// Read one sequence from `in` buffer.  Returns a `Reply`, containing
 /// the status of the read, the report, and the remainder of the in
