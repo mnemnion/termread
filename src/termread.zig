@@ -85,7 +85,7 @@ pub const Quirks = packed struct(u8) {
 /// Scoped to `.termread`
 pub fn debugRead(term: *TermRead, in: []const u8) Reply {
     const reply = term.read(in);
-    logger.debug.log("status: {s}\n{}\n", .{ @tagName(reply.status), reply.report });
+    logger.debug("status: {s}\n{}", .{ @tagName(reply.status), reply.report });
     return reply;
 }
 
@@ -1157,29 +1157,30 @@ pub const TermReport = union(TermEventKind) {
     ) !void {
         switch (term_report) {
             .key => |k| {
-                try writer.print("key: {}\n", .{k});
+                try writer.print("key: {}", .{k});
             },
             .info => |i| {
-                try writer.print("info: {} \n", .{i});
+                try writer.print("info: {}", .{i});
             },
             .paste => |p| {
                 // TODO: sensible formatting here and elsewhere
-                try writer.print("pasted: {s} \n", .{p.string});
+                try writer.print("pasted: {s}", .{p.string});
             },
             .mouse => |m| {
-                try writer.print("mouse: {}\n", .{m});
+                try writer.print("mouse: {}", .{m});
             },
             .more => {
-                try writer.print("more needed. \n", .{});
+                try writer.print("more needed", .{});
             },
             .associated_text => |at| {
-                try writer.print("associated text: {} \n", .{at});
+                try writer.print("associated text: {}", .{at});
             },
             .unrecognized => {
-                try writer.print("unrecognized: \n", .{});
+                // TODO: escape-print sequences here, paste, malformed
+                try writer.print("unrecognized", .{});
             },
             .malformed => {
-                try writer.print("malformed: \n", .{});
+                try writer.print("malformed", .{});
             },
         }
         _ = fmt;
@@ -1229,23 +1230,23 @@ pub const InfoReport = union(InfoKind) {
             .unknown => |un| {
                 try writer.print("unknown sequence: {s}", .{un.sequence});
             },
-            .operating => try writer.writeAll("terminal is operating \n"),
+            .operating => try writer.writeAll("terminal is operating"),
             .is_minimized => |min| {
                 if (min) {
-                    try writer.writeAll("terminal is minimized\n");
+                    try writer.writeAll("terminal is minimized");
                 } else {
-                    try writer.writeAll("terminal is not minimized\n");
+                    try writer.writeAll("terminal is not minimized");
                 }
             },
             .cursor_position => |cpos| {
-                try writer.print("cursor at [{d}, {d}]\n", .{ cpos.row, cpos.col });
+                try writer.print("cursor at [{d}, {d}]", .{ cpos.row, cpos.col });
             },
             .terminal_position => |tpos| {
-                try writer.print("terminal at [{d}, {d}]\n", .{ tpos.x, tpos.y });
+                try writer.print("terminal at [{d}, {d}]", .{ tpos.x, tpos.y });
             },
             .cell_size_pixels => |cell_pix| {
                 try writer.print(
-                    "pixel size of cells: height {d}, width {d}\n",
+                    "pixel size of cells: height {d}, width {d}",
                     .{ cell_pix.height, cell_pix.width },
                 );
             },
@@ -1257,13 +1258,13 @@ pub const InfoReport = union(InfoKind) {
             },
             .terminal_size_pixels => |term_pix| {
                 try writer.print(
-                    "terminal size in pixels: height {d}, width {d}\n",
+                    "terminal size in pixels: height {d}, width {d}",
                     .{ term_pix.height, term_pix.width },
                 );
             },
             .cursor_style => |c_style| {
                 const blink = if (c_style.blinking) "blinking " else "";
-                try writer.print("{s}{s} cursor\n", .{ blink, @tagName(c_style.style) });
+                try writer.print("{s}{s} cursor", .{ blink, @tagName(c_style.style) });
             },
         }
         _ = fmt;
@@ -1299,8 +1300,8 @@ pub const AssociatedTextReport = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try writer.print("key: {}\n", .{text_report.key});
-        try writer.print("with text: {s}\n", .{text_report.text});
+        try writer.print("key: {}", .{text_report.key});
+        try writer.print("with text: {s}", .{text_report.text});
         _ = fmt;
         _ = options;
     }
