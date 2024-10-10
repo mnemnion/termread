@@ -111,6 +111,9 @@ pub fn read(term: *TermRead, in: []const u8) Reply {
                 return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
             }
         },
+        0x0D => { // CR
+            return Reply.ok(special(.enter), in[1..]);
+        },
         0x09 => return Reply.ok(special(.tab), in[1..]),
         // https://vt100.net/docs/vt100-ug/chapter3.html#T3-5
         0x1c => return Reply.ok(modText(mod().Control(), '\\'), in[1..]),
