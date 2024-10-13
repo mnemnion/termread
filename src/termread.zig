@@ -148,7 +148,7 @@ fn parseEsc(term: *TermRead, in: []const u8) Reply {
         0x1b => { // Legacy Alt-Esc
             return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
         },
-        'P' => {}, // A kind of reporting https://terminalguide.namepad.de/seq/csi_sw_t_dollar-1/
+        'P' => return term.parseEscP(in), // A kind of reporting https://terminalguide.namepad.de/seq/csi_sw_t_dollar-1/
         else => { // Lead alt, probably.
             const reply = term.read(in[1..]);
             if (reply.status == .complete) {
@@ -197,6 +197,60 @@ fn parseSs3(term: *TermRead, in: []const u8) Reply {
         else => { // Valid esc code, don't know what
             return notRecognized(in[0..3], in[3..]);
         },
+    }
+    _ = term;
+}
+
+fn parseEscP(term: *TermRead, in: []const u8) Reply {
+    assert(in[0] == '\x1b' and in[1] == 'P');
+    const find_end = std.mem.indexOf(u8, in, "\x1b\\");
+    if (find_end) |end| {
+        switch (in[2]) {
+            '1' => {
+                if (in[3] == '$' and in[4] == 'r') {
+                    const style, const offset = parseParameter(u4, in[5..]) catch {
+                        return malformedRead(end + 1, in);
+                    }; // TODO: we should verify 5 + offset == " q\x1b\\"
+                    _ = offset;
+                    var cursor_style: CursorStyle = undefined;
+                    var blinking = false;
+                    switch (style) {
+                        0 => cursor_style = .block,
+                        1 => {
+                            cursor_style = .block;
+                            blinking = true;
+                        },
+                        2 => cursor_style = .block,
+                        3 => {
+                            cursor_style = .underline;
+                            blinking = true;
+                        },
+                        4 => cursor_style = .underline,
+                        5 => {
+                            cursor_style = .bar;
+                            blinking = true;
+                        },
+                        6 => cursor_style = .bar,
+                        else => {
+                            return notRecognized(in[0 .. end + 1], in[end + 1 ..]);
+                        },
+                    }
+                    return Reply{
+                        .status = .complete,
+                        .report = .{
+                            .info = .{
+                                .cursor_style = .{
+                                    .style = cursor_style,
+                                    .blinking = blinking,
+                                },
+                            },
+                        },
+                        .rest = in[end + 1 ..],
+                    };
+                }
+            },
+            else => return notRecognized(in[0 .. end + 1], in[end + 1 ..]),
+        }
     }
     _ = term;
 }
@@ -1098,7 +1152,7 @@ pub const Reply = struct {
     ) !void {
         try writer.print("status: {s}\n", .{@tagName(reply.status)});
         try reply.report.format(fmt, options, writer);
-        try writer.print("rest: '{s}'\n", .{reply.rest});
+        try writer.print("\nrest: '{s}'", .{reply.rest});
     }
 };
 
@@ -1421,7 +1475,7 @@ pub const InfoKind = enum {
 
 pub const CursorStyle = enum {
     block,
-    steady,
+    bar,
     underline,
 };
 
@@ -1657,7 +1711,7 @@ pub const Key = union(KeyTag) {
     insert,
     f: u6,
     char: u21,
-    keypad: KeyPadKey,
+    keypad: KeyPadKey, // TODO: store ISO value by packing struct with bool
     esc,
     caps_lock,
     scroll_lock,
