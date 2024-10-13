@@ -139,7 +139,7 @@ pub fn read(term: *TermRead, in: []const u8) Reply {
 fn parseEsc(term: *TermRead, in: []const u8) Reply {
     assert(in[0] == '\x1b');
     if (in.len == 1) {
-        return Reply.ok(special(.esc), in);
+        return Reply.ok(special(.esc), in[1..]);
     }
     switch (in[1]) {
         'O' => return term.parseSs3(in),
@@ -202,6 +202,7 @@ fn parseSs3(term: *TermRead, in: []const u8) Reply {
 }
 
 fn parseEscP(term: *TermRead, in: []const u8) Reply {
+    _ = term;
     assert(in[0] == '\x1b' and in[1] == 'P');
     const find_end = std.mem.indexOf(u8, in, "\x1b\\");
     if (find_end) |end| {
@@ -247,12 +248,15 @@ fn parseEscP(term: *TermRead, in: []const u8) Reply {
                         },
                         .rest = in[end + 1 ..],
                     };
+                } else {
+                    return notRecognized(in[0 .. end + 1], in[end + 1 ..]);
                 }
             },
             else => return notRecognized(in[0 .. end + 1], in[end + 1 ..]),
         }
+    } else {
+        return moreNeeded(false, in);
     }
-    _ = term;
 }
 
 fn parseCsi(term: *TermRead, in: []const u8) Reply {
