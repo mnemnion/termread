@@ -85,7 +85,7 @@ pub const Quirks = packed struct(u8) {
 /// Scoped to `.termread`
 pub fn debugRead(term: *TermRead, in: []const u8) Reply {
     const reply = term.read(in);
-    logger.debug("status: {s}\n{}", .{ @tagName(reply.status), reply.report });
+    logger.debug("status: {s}, {d} bytes\n{}", .{ @tagName(reply.status), reply.bytes, reply.report });
     return reply;
 }
 
@@ -98,40 +98,39 @@ pub fn read(term: *TermRead, in: []const u8) Reply {
     }
     switch (in[0]) {
         // NUL is legacy for Ctrl-Space.
-        0 => return Reply.ok(modText(mod().Control(), ' '), in[1..]),
+        0 => return Reply.ok(modText(mod().Control(), ' '), 1, in),
         // Legacy ^X, for some values of X.
         0x01...0x07, 0x0a...0x0c, 0x0e...0x1a => |c| {
             // All reporting is lower case.
-            return Reply.ok(modText(mod().Control(), c + 0x60), in[1..]);
+            return Reply.ok(modText(mod().Control(), c + 0x60), 1, in);
         },
         0x08 => { // <Del>
             if (term.quirks.backspace_as_delete) {
-                return Reply.ok(special(.backspace), in[1..]);
+                return Reply.ok(special(.backspace), 1, in);
             } else {
-                return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
+                return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), 1, in);
             }
         },
         0x0D => { // CR
-            return Reply.ok(special(.enter), in[1..]);
+            return Reply.ok(special(.enter), 1, in);
         },
-        0x09 => return Reply.ok(special(.tab), in[1..]),
+        0x09 => return Reply.ok(special(.tab), 1, in),
         // https://vt100.net/docs/vt100-ug/chapter3.html#T3-5
-        0x1c => return Reply.ok(modText(mod().Control(), '\\'), in[1..]),
-        0x1d => return Reply.ok(modText(mod().Control(), ']'), in[1..]),
-        0x1e => return Reply.ok(modText(mod().Control(), '~'), in[1..]),
-        0x1f => return Reply.ok(modText(mod().Control(), '?'), in[1..]),
-        0x20 => return Reply.ok(text(' '), in[1..]),
+        0x1c => return Reply.ok(modText(mod().Control(), '\\'), 1, in),
+        0x1d => return Reply.ok(modText(mod().Control(), ']'), 1, in),
+        0x1e => return Reply.ok(modText(mod().Control(), '~'), 1, in),
+        0x1f => return Reply.ok(modText(mod().Control(), '?'), 1, in),
+        0x20 => return Reply.ok(text(' '), 1, in),
         0x7f => { // <BS>
             if (term.quirks.backspace_as_delete) {
-                return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), in[1..]);
+                return Reply.ok(modKey(mod().Control(), specialKey(.backspace)), 1, in);
             } else {
-                return Reply.ok(special(.backspace), in[1..]);
+                return Reply.ok(special(.backspace), 1, in);
             }
         },
         0x1b => { // The Main Event!
             return term.parseEsc(in);
         },
-
         else => return term.parseText(in),
     }
 }
@@ -139,14 +138,14 @@ pub fn read(term: *TermRead, in: []const u8) Reply {
 fn parseEsc(term: *TermRead, in: []const u8) Reply {
     assert(in[0] == '\x1b');
     if (in.len == 1) {
-        return Reply.ok(special(.esc), in[1..]);
+        return Reply.ok(special(.esc), 1, in);
     }
     switch (in[1]) {
         'O' => return term.parseSs3(in),
         '[' => return term.parseCsi(in),
         ']' => {}, // OSC
         0x1b => { // Legacy Alt-Esc
-            return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), in[2..]);
+            return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), 2, in);
         },
         'P' => return term.parseEscP(in), // A kind of reporting https://terminalguide.namepad.de/seq/csi_sw_t_dollar-1/
         else => { // Lead alt, probably.
@@ -157,7 +156,7 @@ fn parseEsc(term: *TermRead, in: []const u8) Reply {
                         // Lead-alt is legacy, so we only care about modifier,
                         // and key:
                         var kmod = k.mod;
-                        return Reply.ok(modKey(kmod.Alt(), k.value), reply.rest);
+                        return Reply.ok(modKey(kmod.Alt(), k.value), 1 + reply.bytes, in);
                     },
                     .paste,
                     .mouse,
@@ -168,9 +167,10 @@ fn parseEsc(term: *TermRead, in: []const u8) Reply {
                         // Plausible interpretation: Esc followed by something
                         // else.  Rather than try and figure it out, we report
                         // the escape and handle a reparse.
-                        return Reply.ok(special(.esc), in[1..]);
+                        return Reply.ok(special(.esc), 1, in);
                     },
-                    .unrecognized, .malformed => return reply,
+                    .unrecognized => return notRecognized(1 + reply.bytes, in),
+                    .malformed => return malformedRead(1 + reply.bytes, in),
                 }
             }
         },
@@ -185,17 +185,17 @@ fn parseSs3(term: *TermRead, in: []const u8) Reply {
     if (in.len == 2) return moreNeeded(false, in);
 
     switch (in[2]) {
-        'A' => return Reply.ok(special(.up), in[3..]),
-        'B' => return Reply.ok(special(.down), in[3..]),
-        'C' => return Reply.ok(special(.right), in[3..]),
-        'D' => return Reply.ok(special(.left), in[3..]),
-        'H' => return Reply.ok(special(.home), in[3..]),
-        'F' => return Reply.ok(special(.end), in[3..]),
+        'A' => return Reply.ok(special(.up), 3, in),
+        'B' => return Reply.ok(special(.down), 3, in),
+        'C' => return Reply.ok(special(.right), 3, in),
+        'D' => return Reply.ok(special(.left), 3, in),
+        'H' => return Reply.ok(special(.home), 3, in),
+        'F' => return Reply.ok(special(.end), 3, in),
         'P'...'S' => |fk| { // 'P' - 0x4f aka '0' == 1
-            return Reply.ok(function(fk - 0x4f), in[3..]);
+            return Reply.ok(function(fk - 0x4f), 3, in);
         },
         else => { // Valid esc code, don't know what
-            return notRecognized(in[0..3], in[3..]);
+            return notRecognized(3, in);
         },
     }
     _ = term;
@@ -205,12 +205,13 @@ fn parseEscP(term: *TermRead, in: []const u8) Reply {
     _ = term;
     assert(in[0] == '\x1b' and in[1] == 'P');
     const find_end = std.mem.indexOf(u8, in, "\x1b\\");
-    if (find_end) |end| {
+    if (find_end) |almost_end| {
+        const end = almost_end + 1;
         switch (in[2]) {
             '1' => {
                 if (in[3] == '$' and in[4] == 'r') {
                     const style, const offset = parseParameter(u4, in[5..]) catch {
-                        return malformedRead(end + 1, in);
+                        return malformedRead(end, in);
                     }; // TODO: we should verify 5 + offset == " q\x1b\\"
                     _ = offset;
                     var cursor_style: CursorStyle = undefined;
@@ -233,7 +234,7 @@ fn parseEscP(term: *TermRead, in: []const u8) Reply {
                         },
                         6 => cursor_style = .bar,
                         else => {
-                            return notRecognized(in[0 .. end + 1], in[end + 1 ..]);
+                            return notRecognized(end, in);
                         },
                     }
                     return Reply{
@@ -246,13 +247,14 @@ fn parseEscP(term: *TermRead, in: []const u8) Reply {
                                 },
                             },
                         },
-                        .rest = in[end + 1 ..],
+                        .bytes = end,
+                        .buffer = in,
                     };
                 } else {
-                    return notRecognized(in[0 .. end + 1], in[end + 1 ..]);
+                    return notRecognized(end, in);
                 }
             },
-            else => return notRecognized(in[0 .. end + 1], in[end + 1 ..]),
+            else => return notRecognized(end, in),
         }
     } else {
         return moreNeeded(false, in);
@@ -273,7 +275,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     // Csi-u?
     if (b == 'u') {
         if (!info.has_intermediates)
-            return term.parseCsiU(in, in[2..info.stop], rest)
+            return term.parseCsiU(info, in, in[2..info.stop], rest)
         else // Arguably unrecognized (private use and all),
             //  but not for our purposes
             return malformedRead(info.stop, in);
@@ -281,16 +283,16 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     // Case of no modifiers.
     if (info.stop == 3) {
         switch (b) { // Various legacy special keys
-            'A' => return Reply.ok(special(.up), rest),
-            'B' => return Reply.ok(special(.down), rest),
-            'C' => return Reply.ok(special(.right), rest),
-            'D' => return Reply.ok(special(.left), rest),
-            'E' => return Reply.ok(keyPad(.KP_Begin), rest),
-            'H' => return Reply.ok(special(.home), rest),
-            'F' => return Reply.ok(special(.end), rest),
-            'Z' => return Reply.ok(modKey(mod().Shift(), specialKey(.tab)), rest),
-            'M' => return term.parseCsiMouse(in),
-            else => return notRecognized(in[0..info.stop], rest),
+            'A' => return Reply.ok(special(.up), info.stop, in),
+            'B' => return Reply.ok(special(.down), info.stop, in),
+            'C' => return Reply.ok(special(.right), info.stop, in),
+            'D' => return Reply.ok(special(.left), info.stop, in),
+            'E' => return Reply.ok(keyPad(.KP_Begin), info.stop, in),
+            'H' => return Reply.ok(special(.home), info.stop, in),
+            'F' => return Reply.ok(special(.end), info.stop, in),
+            'Z' => return Reply.ok(modKey(mod().Shift(), specialKey(.tab)), info.stop, in),
+            'M' => return term.parseCsiMouse(info, in),
+            else => return notRecognized(info.stop, in),
         }
     }
     if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
@@ -299,7 +301,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     if (info.is_private_use) {
         assert('<' <= in[2] and in[2] <= '?');
         switch (in[2]) {
-            '<' => return parseDigitMouseEncodings(in, 1006),
+            '<' => return parseDigitMouseEncodings(info, in, 1006),
             '=' => {},
             '>' => {},
             '?' => {}, // Various sorts of réportage
@@ -309,26 +311,26 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     if ('0' <= b and b <= '9') return term.parseCsiDigit(in, info);
     // Handle other CSI sequences we might see
     switch (b) {
-        'M' => return parseDigitMouseEncodings(in, 1015),
+        'M' => return parseDigitMouseEncodings(info, in, 1015),
         'Z' => {
             // Support fixterms Ctrl-Shift-Tab
             if (std.mem.eql(u8, in[2..6], "1;5")) {
-                return Reply.ok(modKey(mod().Shift().Control(), specialKey(.tab)), rest);
+                return Reply.ok(modKey(mod().Shift().Control(), specialKey(.tab)), info.stop, rest);
             } else { // There are some sequences here, probably not worth recognizing
-                return notRecognized(in[0..info.stop], rest);
+                return notRecognized(info.stop, in);
             }
         },
         'R' => return term.parseCursorInfo(info, in),
         't' => {}, // Terminal Reports
-        else => return notRecognized(in[0..info.stop], rest),
+        else => return notRecognized(info.stop, in),
     }
     // Many options due to reporting of various sorts, TBD
-    return notRecognized(in[0..info.stop], rest);
+    return notRecognized(info.stop, rest);
 }
 
 const UTF_MAX = 0x10ffff;
 
-fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8) Reply {
+fn parseCsiU(term: *TermRead, info: CsiInfo, in: []const u8, seq: []const u8, rest: []const u8) Reply {
     // Preconditions
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
@@ -337,17 +339,16 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
     // Structure:
     // unicode-key-code[:shifted-key[:base-layout-key]][;modifiers[:event-type][;text-as-codepoints]]u
     // CSI validated, 'u' is known.
-    const seq_idx = 2 + seq.len;
     const codepoint, var idx = parseParameter(u21, seq) catch {
-        return malformedRead(seq_idx, in);
+        return malformedRead(info.stop, in);
     };
     if (codepoint > UTF_MAX) {
         // Overlarge codepoint
-        return malformedRead(2 + seq.len, in);
+        return malformedRead(info.stop, in);
     }
     if (idx == seq.len - 1) {
         // Easy
-        return Reply.ok(text(codepoint), rest);
+        return Reply.ok(text(codepoint), idx, rest);
     }
     const key_val = keyFromCodepoint(codepoint);
     // Obtain shifted key, if available.
@@ -360,10 +361,10 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
                 break :shifted 0;
             } else {
                 const shift_point, const idx_delta = parseParameter(u21, seq[idx..]) catch {
-                    return malformedRead(seq_idx, in);
+                    return malformedRead(info.stop, in);
                 };
                 if (shift_point > UTF_MAX) {
-                    return malformedRead(seq_idx, in);
+                    return malformedRead(info.stop, in);
                 }
                 idx += idx_delta;
                 break :shifted shift_point;
@@ -378,10 +379,10 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
             if (seq[idx] == ':') {
                 idx += 1;
                 const base_point, const idx_delta = parseParameter(u21, seq[idx..]) catch {
-                    return malformedRead(seq_idx, in);
+                    return malformedRead(info.stop, in);
                 };
                 if (base_point > UTF_MAX) {
-                    return malformedRead(seq_idx, in);
+                    return malformedRead(info.stop, in);
                 }
                 idx += idx_delta;
                 break :base base_point;
@@ -397,7 +398,7 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
         idx += 1;
         if (seq[idx] != ';') {
             var mod_value, const idx_delta = parseParameter(u9, seq[idx..]) catch {
-                return malformedRead(seq_idx, in);
+                return malformedRead(info.stop, in);
             };
             mod_value -= 1;
             if (mod_value <= std.math.maxInt(u8)) {
@@ -407,21 +408,21 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
             idx += idx_delta;
         }
     } // Spec requires this to be consistent:
-    if (shifted_key > 0 and !modifier.shift) return malformedRead(2 + seq.len, in);
+    if (shifted_key > 0 and !modifier.shift) return malformedRead(info.stop, in);
 
     // Event type?
     const event: KeyEvent = event: {
         if (seq[idx] == ':') {
             idx += 1;
             const event_value, const idx_delta = parseParameter(u2, seq[idx..]) catch {
-                return malformedRead(seq_idx, in);
+                return malformedRead(info.stop, in);
             };
             idx += idx_delta;
             switch (event_value) {
                 1 => break :event .press,
                 2 => break :event .repeat,
                 3 => break :event .release,
-                0 => return malformedRead(2 + seq.len, in),
+                0 => return malformedRead(info.stop, in),
             }
         } else {
             break :event .press;
@@ -445,10 +446,10 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
         var code_count: usize = 0;
         while (code_count <= MAX_ASSOCIATED_TEXT) {
             const assoc_value, const idx_delta = parseParameter(u21, seq[idx..]) catch {
-                return malformedRead(seq_idx, in);
+                return malformedRead(info.stop, in);
             };
             if (assoc_value > UTF_MAX) {
-                return malformedRead(seq_idx, in);
+                return malformedRead(info.stop, in);
             } // WTF-8 == we don't care if it's a surrogate, yeet it
             const wrote = std.unicode.wtf8Encode(assoc_value, term.buffer[term.buf_len..]) catch unreachable;
             term.buf_len += wrote;
@@ -474,7 +475,8 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
                     .text = term.buffer[0..term.buf_len],
                 },
             },
-            .rest = rest,
+            .bytes = info.stop,
+            .buffer = in,
         };
     }
     // Assertion: we read the entire sequence
@@ -490,95 +492,99 @@ fn parseCsiU(term: *TermRead, in: []const u8, seq: []const u8, rest: []const u8)
                 .base_key = base_key,
             },
         },
-        .rest = rest,
+        .bytes = info.stop,
+        .buffer = in,
     };
 }
 
+// TODO: info before in
 fn parseCsiDigit(term: *TermRead, in: []const u8, info: CsiInfo) Reply {
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
     switch (in[2]) {
         // TODO: surely some of these mean something.
         '1', '3', '4', '5', '6', '7', '8', '9' => {
-            return notRecognized(in[0..info.stop], in[info.stop..]);
+            return notRecognized(info.stop, in);
         },
         '2' => {
             if (in.len >= 6 and in[3] == '0' and in[4] == '0' and in[5] == '~') {
                 return term.parsePasteBracket(in, false);
             } else {
-                return notRecognized(in[0..info.stop], in[info.stop..]);
+                return notRecognized(info.stop, in);
             }
         },
         else => unreachable,
     }
 }
 
-fn parseCsiMouse(term: *TermRead, in: []const u8) Reply {
+fn parseCsiMouse(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     assert(std.mem.eql(u8, in[0..3], "\x1b[M"));
     if (!term.quirks.utf8_encoded_mouse) {
-        return parseClassicMouse(in);
+        return parseClassicMouse(info, in);
     } else {
-        return parseDecset1005(in);
+        return parseDecset1005(info, in);
     }
 }
 
-fn parseDecset1005(in: []const u8) Reply {
+// TODO: this needs to take the info
+fn parseDecset1005(info: CsiInfo, in: []const u8) Reply {
     const btn = in[3];
     const b1len = std.unicode.utf8ByteSequenceLength(in[4]) catch {
-        return malformedRead(4, in);
+        return malformedRead(info.stop, in);
     };
     const col = std.unicode.utf8Decode(in[4 .. 4 + b1len]) catch {
-        return malformedRead(4, in);
+        return malformedRead(info.stop, in);
     };
     const r_idx: usize = 4 + b1len;
     const b2len = std.unicode.utf8ByteSequenceLength(in[r_idx]) catch {
-        return malformedRead(4, in);
+        return malformedRead(info.stop, in);
     };
-    const row = std.unicode.wtf8Decode(in[r_idx..]) catch {
-        return malformedRead(r_idx, in);
+    const row = std.unicode.wtf8Decode(in[r_idx..][0..b2len]) catch {
+        return malformedRead(info.stop, in);
     };
-    const rest_idx = r_idx + b2len;
     if (btn < 32 or col < 32 or row < 32) {
-        return malformedRead(rest_idx, in);
+        return malformedRead(info.stop, in);
     }
     return parseMouseNumbers(
         btn - 32,
         @intCast(col - 32),
         @intCast(row - 32),
         .unknown,
-        in[rest_idx..],
+        info.stop,
+        in,
     );
 }
 
-fn parseDigitMouseEncodings(in: []const u8, protocol: comptime_int) Reply {
+// TODO: this needs to take the info
+fn parseDigitMouseEncodings(info: CsiInfo, in: []const u8, protocol: comptime_int) Reply {
     assert(protocol == 1015 or protocol == 1006); // 1016 parsing is identical
     var idx: usize = if (protocol == 1015) 2 else 3;
     var btn, var idx_delta = parseParameter(u8, in[idx..]) catch {
-        return malformedRead(idx, in);
+        return malformedRead(info.stop, in);
     };
     idx += idx_delta;
     if (protocol == 1015) {
         btn -= 32;
     }
     if (in[idx] != ';') {
-        return malformedRead(idx, in);
+        return malformedRead(info.stop, in);
     } else {
         idx += 1;
     }
     var col, idx_delta = parseParameter(u16, in[idx..]) catch {
-        return malformedRead(idx, in);
+        return malformedRead(info.stop, in);
     };
     if (protocol == 1015) {
         col -= 32;
     }
     idx += idx_delta;
     if (in[idx] != ';') {
-        return malformedRead(idx, in);
+        return malformedRead(info.stop, in);
     } else {
         idx += 1;
     }
     var row, idx_delta = parseParameter(u16, in[idx..]) catch {
-        return malformedRead(idx, in);
+        return malformedRead(info.stop, in);
     };
     if (protocol == 1015) {
         row -= 32;
@@ -596,13 +602,14 @@ fn parseDigitMouseEncodings(in: []const u8, protocol: comptime_int) Reply {
             'm' => break :status .released,
             // TODO: this should be an unreachable,
             // I need to look for other CSI < encodings
-            else => return malformedRead(idx, in),
+            else => return malformedRead(info.stop, in),
         }
     };
-    return parseMouseNumbers(btn, col, row, release_status, in[idx + 1 ..]);
+    return parseMouseNumbers(btn, col, row, release_status, info.stop, in);
 }
 
-fn parseClassicMouse(in: []const u8) Reply {
+// TODO: this needs to take the info
+fn parseClassicMouse(info: CsiInfo, in: []const u8) Reply {
     if (in.len < 6) {
         return moreNeeded(false, in);
     }
@@ -610,16 +617,15 @@ fn parseClassicMouse(in: []const u8) Reply {
     const col = in[4];
     const row = in[5];
     if (btn < 32 or col < 32 or row < 32) {
-        return malformedRead(6, in);
+        return malformedRead(info.stop, in);
     }
-    return parseMouseNumbers(btn - 32, col - 32, row - 32, .unknown, in[6..]);
+    return parseMouseNumbers(btn - 32, col - 32, row - 32, .unknown, info.stop, in);
 }
 
 fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     _ = term;
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
-    const rest = in[info.stop..];
     if (info.byte == '~') { // Legacy special keys + paste
         const keyval, const idx_delta = parseParameter(u21, in[2..]) catch {
             return malformedRead(info.stop, in);
@@ -653,7 +659,7 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             29 => specialKey(.menu),
             else => return malformedRead(info.stop, in),
         };
-        return Reply.ok(modKey(modifier, key), rest);
+        return Reply.ok(modKey(modifier, key), info.stop, in);
     }
     // Get modifier one of two ways.
     var modifier: KeyMod = mod();
@@ -680,17 +686,17 @@ fn parseModifiedCsi(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             return malformedRead(info.stop, in);
         }
     }
-    switch (info.stop) {
-        'A' => return Reply.ok(modKey(modifier, specialKey(.up)), rest),
-        'B' => return Reply.ok(modKey(modifier, specialKey(.down)), rest),
-        'C' => return Reply.ok(modKey(modifier, specialKey(.right)), rest),
-        'D' => return Reply.ok(modKey(modifier, specialKey(.left)), rest),
-        'E' => return Reply.ok(modKey(modifier, kpKey(.KP_Begin)), rest),
-        'H' => return Reply.ok(modKey(modifier, specialKey(.home)), rest),
-        'F' => return Reply.ok(modKey(modifier, specialKey(.end)), rest),
-        'P' => return Reply.ok(modKey(modifier, Key{ .f = 1 }), rest),
-        'Q' => return Reply.ok(modKey(modifier, Key{ .f = 2 }), rest),
-        'S' => return Reply.ok(modKey(modifier, Key{ .f = 4 }), rest),
+    switch (info.byte) {
+        'A' => return Reply.ok(modKey(modifier, specialKey(.up)), info.stop, in),
+        'B' => return Reply.ok(modKey(modifier, specialKey(.down)), info.stop, in),
+        'C' => return Reply.ok(modKey(modifier, specialKey(.right)), info.stop, in),
+        'D' => return Reply.ok(modKey(modifier, specialKey(.left)), info.stop, in),
+        'E' => return Reply.ok(modKey(modifier, kpKey(.KP_Begin)), info.stop, in),
+        'H' => return Reply.ok(modKey(modifier, specialKey(.home)), info.stop, in),
+        'F' => return Reply.ok(modKey(modifier, specialKey(.end)), info.stop, in),
+        'P' => return Reply.ok(modKey(modifier, Key{ .f = 1 }), info.stop, in),
+        'Q' => return Reply.ok(modKey(modifier, Key{ .f = 2 }), info.stop, in),
+        'S' => return Reply.ok(modKey(modifier, Key{ .f = 4 }), info.stop, in),
         else => unreachable, // We checked this at function entrance
     }
 }
@@ -715,7 +721,8 @@ fn parsePasteBracket(term: *TermRead, in: []const u8, more: bool) Reply {
                             .has_esc = has_esc,
                         },
                     },
-                    .rest = in[idx + 6 ..],
+                    .bytes = idx + 6,
+                    .buffer = in,
                 };
             } else {
                 has_esc = true;
@@ -732,7 +739,8 @@ fn parsePasteBracket(term: *TermRead, in: []const u8, more: bool) Reply {
                 .partial = true,
             },
         },
-        .rest = in[idx..],
+        .bytes = idx,
+        .buffer = in,
     };
 }
 
@@ -754,10 +762,10 @@ fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     // Variant form has ;1R
     if (in[idx] == ';') {
         idx += 1;
-        if (in[idx] != '1') return notRecognized(in[0..info.stop], in[info.stop..]);
+        if (in[idx] != '1') return notRecognized(info.stop, in);
         idx += 1;
     }
-    if (in[idx] != 'R') return notRecognized(in[0..info.stop], in[info.stop..]);
+    if (in[idx] != 'R') return notRecognized(info.stop, in);
     idx += 1;
     return Reply{
         .status = .complete,
@@ -769,7 +777,8 @@ fn parseCursorInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
                 },
             },
         },
-        .rest = in[idx..],
+        .bytes = idx,
+        .buffer = in,
     };
 }
 
@@ -778,23 +787,25 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     assert(info.byte == 't');
     switch (in[2]) {
         '1' => {
-            if (in[3] != 't') return notRecognized(in[0..info.stop], in[info.stop..]);
+            if (in[3] != 't') return notRecognized(info.stop, in);
             return Reply{
                 .status = .complete,
                 .report = .{
                     .info = .{ .is_minimized = false },
                 },
-                .rest = in[info.stop..],
+                .bytes = info.stop,
+                .buffer = in,
             };
         },
         '2' => {
-            if (in[3] != 't') return notRecognized(in[0..info.stop], in[info.stop..]);
+            if (in[3] != 't') return notRecognized(info.stop, in);
             return Reply{
                 .status = .complete,
                 .report = .{
                     .info = .{ .is_minimized = true },
                 },
-                .rest = in[info.stop..],
+                .bytes = info.stop,
+                .buffer = in,
             };
         },
         '3', '4', '5', '6', '8', '9' => |kind| {
@@ -854,10 +865,11 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             return Reply{
                 .status = .complete,
                 .report = i_report,
-                .rest = in[idx + 1 ..],
+                .bytes = info.stop,
+                .buffer = in,
             };
         },
-        else => return notRecognized(in[0..info.stop], in[info.stop..]),
+        else => return notRecognized(info.stop, in),
     }
     _ = term;
 }
@@ -870,7 +882,7 @@ fn parseText(term: *TermRead, in: []const u8) Reply {
     const code = std.unicode.utf8Decode(in[0..b]) catch {
         return malformedRead(b, in);
     };
-    return Reply.ok(text(code), in[b..]);
+    return Reply.ok(text(code), b, in);
 }
 
 const ParameterError = error{
@@ -902,7 +914,7 @@ const MouseReleaseStatus = enum {
     unknown,
 };
 
-fn parseMouseNumbers(button: u8, col: u16, row: u16, press: MouseReleaseStatus, rest: []const u8) Reply {
+fn parseMouseNumbers(button: u8, col: u16, row: u16, press: MouseReleaseStatus, idx: usize, in: []const u8) Reply {
     const btn_mods: PackedMouseButton = @bitCast(button);
     const mouse_press: MousePress = mouse_press: {
         if (btn_mods.iswacky) {
@@ -954,7 +966,8 @@ fn parseMouseNumbers(button: u8, col: u16, row: u16, press: MouseReleaseStatus, 
             .col = col,
             .row = row,
         } },
-        .rest = rest,
+        .bytes = idx,
+        .buffer = in,
     };
 }
 
@@ -1099,13 +1112,23 @@ fn function(num: u21) TermReport {
     } };
 }
 
-fn notRecognized(seq: []const u8, rest: []const u8) Reply {
+fn infoReport(info: InfoReport, idx: usize, in: []const u8) Reply {
+    return Reply{
+        .status = .complete,
+        .report = info,
+        .bytes = idx,
+        .buffer = in,
+    };
+}
+
+fn notRecognized(idx: usize, in: []const u8) Reply {
     return Reply{
         .status = .unrecognized,
         .report = TermReport{
-            .unrecognized = .{ .sequence = seq },
+            .unrecognized = .{ .sequence = in[0..idx] },
         },
-        .rest = rest,
+        .buffer = in,
+        .bytes = idx,
     };
 }
 
@@ -1115,17 +1138,20 @@ fn moreNeeded(is_paste: bool, in: []const u8) Reply {
         .report = TermReport{
             .more = .{ .is_paste = is_paste },
         },
-        .rest = in,
+        .bytes = 0,
+        .buffer = in,
     };
 }
 
 fn malformedRead(idx: usize, in: []const u8) Reply {
+    assert(idx > 0);
     return Reply{
         .status = .malformed,
         .report = TermReport{
             .malformed = .{ .sequence = in[0..idx] },
         },
-        .rest = in[idx..],
+        .buffer = in,
+        .bytes = idx,
     };
 }
 
@@ -1136,16 +1162,31 @@ pub const Reply = struct {
     status: ReadStatus,
     /// Associated report.
     report: TermReport,
-    /// Remainder of buffer (may be empty).
-    rest: []const u8,
+    /// Bytes read
+    bytes: usize,
+    /// Buffer read from
+    buffer: []const u8,
 
     /// Convenience function for 'normal' replies.
-    pub fn ok(report: TermReport, rest: []const u8) Reply {
+    pub fn ok(report: TermReport, bytes: usize, buf: []const u8) Reply {
+        assert(bytes > 0);
         return Reply{
             .status = .complete,
             .report = report,
-            .rest = rest,
+            .bytes = bytes,
+            .buffer = buf,
         };
+    }
+
+    pub fn restOfBuffer(reply: Reply) []const u8 {
+        return reply.buffer[reply.bytes..];
+    }
+
+    /// Amount remaining to be read.  This will only give useful
+    /// results if the read is clamped to the amount read from stdin,
+    /// which it should be for a variety of reasons.
+    pub fn remaining(reply: Reply) usize {
+        return reply.buffer[reply.bytes..].len;
     }
 
     pub fn format(
@@ -1154,9 +1195,11 @@ pub const Reply = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try writer.print("status: {s}\n", .{@tagName(reply.status)});
+        try writer.print(
+            "status: {s} read: {d}, {d} left\n",
+            .{ @tagName(reply.status), reply.bytes, reply.remaining() },
+        );
         try reply.report.format(fmt, options, writer);
-        try writer.print("\nrest: '{s}'", .{reply.rest});
     }
 };
 
@@ -1958,34 +2001,26 @@ test "parsing" {
     }
     try oh.snap(
         @src(),
-        \\status: complete
+        \\status: complete read: 1, 1 left
         \\key: Q
-        \\rest: 'z'
-        \\
         ,
     ).showFmt(term.read("Qz"));
     try oh.snap(
         @src(),
-        \\status: complete
+        \\status: complete read: 2, 0 left
         \\key: <A-<esc>>
-        \\rest: ''
-        \\
         ,
     ).showFmt(term.read("\x1b\x1b"));
     try oh.snap(
         @src(),
-        \\status: complete
+        \\status: complete read: 7, 0 left
         \\key: <S-A-a>
-        \\rest: ''
-        \\
         ,
     ).showFmt(term.read("\x1b[97;4u"));
     try oh.snap(
         @src(),
-        \\status: complete
+        \\status: complete read: 3, 4 left
         \\key: <down>
-        \\rest: '7;4u'
-        \\
         ,
     ).showFmt(term.read("\x1b[B7;4u"));
 }
@@ -2000,33 +2035,10 @@ test "Associated Text" {
     var term = TermRead{};
     try oh.snap(
         @src(),
-        \\termread.Reply
-        \\  .status: termread.ReadStatus
-        \\    .complete
-        \\  .report: termread.TermReport
-        \\    .associated_text: termread.AssociatedTextReport
-        \\      .key: termread.KeyReport
-        \\        .mod: termread.KeyMod
-        \\          .shift: bool = false
-        \\          .alt: bool = false
-        \\          .control: bool = true
-        \\          .super: bool = true
-        \\          .hyper: bool = false
-        \\          .meta: bool = false
-        \\          .capslock: bool = false
-        \\          .numlock: bool = false
-        \\        .value: termread.Key
-        \\          .char: u21 = 97
-        \\        .event: termread.KeyEvent
-        \\          .repeat
-        \\        .shifted: u21 = 0
-        \\        .base_key: u21 = 0
-        \\      .text: []const u8
-        \\        "αβγδ"
-        \\  .rest: []const u8
-        \\    ""
+        \\status: complete read: 26, 0 left
+        \\associated text: key: <C-D-a>with text: αβγδ
         ,
-    ).expectEqual(term.read("\x1b[97;13:2;945:946:947:948u"));
+    ).expectEqualFmt(term.read("\x1b[97;13:2;945:946:947:948u"));
 }
 
 test "mouse reports" {
