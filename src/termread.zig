@@ -307,6 +307,16 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     }
     const rest = in[info.stop..];
     const b = info.byte;
+    if (info.is_private_use) {
+        assert('<' <= in[2] and in[2] <= '?');
+        switch (in[2]) {
+            '<' => return parseDigitMouseEncodings(info, in, 1006),
+            '=' => return notRecognized(info.stop, in),
+            '>' => return notRecognized(info.stop, in),
+            '?' => return term.parseCsiQuery(info, in), // Various sorts of réportage
+            else => unreachable,
+        }
+    }
     // Csi-u?
     if (b == 'u') {
         if (!info.has_intermediates)
@@ -333,17 +343,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     if (std.mem.indexOfScalar(u8, "~ABCDEFHPQS", b)) |_| {
         return term.parseModifiedCsi(info, in);
     }
-    if (info.is_private_use) {
-        assert('<' <= in[2] and in[2] <= '?');
-        switch (in[2]) {
-            '<' => return parseDigitMouseEncodings(info, in, 1006),
-            '=' => {},
-            '>' => {},
-            '?' => {}, // Various sorts of réportage
-            else => unreachable,
-        }
-    }
-    if ('0' <= b and b <= '9') return term.parseCsiDigit(in, info);
+    if ('0' <= b and b <= '9') return term.parseCsiDigit(info, in);
     // Handle other CSI sequences we might see
     switch (b) {
         'M' => return parseDigitMouseEncodings(info, in, 1015),
@@ -585,8 +585,7 @@ fn parseCsiU(term: *TermRead, info: CsiInfo, in: []const u8, seq: []const u8, re
     };
 }
 
-// TODO: info before in
-fn parseCsiDigit(term: *TermRead, in: []const u8, info: CsiInfo) Reply {
+fn parseCsiDigit(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
     switch (in[2]) {
@@ -602,6 +601,21 @@ fn parseCsiDigit(term: *TermRead, in: []const u8, info: CsiInfo) Reply {
             }
         },
         else => unreachable,
+    }
+}
+
+fn parseCsiQuery(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
+    assert(in[0] == '\x1b' and in[1] == '[' and in[2] == '?');
+    _ = term;
+    switch (info.byte) {
+        'u' => {
+            const flags, _ = parseParameter(u8, in[3..]) catch {
+                return malformedRead(info.stop, in);
+            };
+            const csi_flags: CsiUFlags = @bitCast(flags);
+            return infoReport(.{ .csi_u = csi_flags }, info.stop, in);
+        },
+        else => return notRecognized(info.stop, in),
     }
 }
 
@@ -1132,15 +1146,14 @@ const CsiInfo = struct {
 fn validateCsiSequence(in: []const u8) ?CsiInfo {
     // §5.4.1b
     const is_private_use = '<' <= in[2] and in[2] <= '?';
-    if (is_private_use) return CsiInfo{
-        .byte = 0xff,
-        .stop = 0, // Not used, would otherwise parse as a one-letter CSI
-        .is_private_use = true,
-        .has_intermediates = false,
-        .valid = true, // So far as we know!
-    };
+    var start: usize = undefined;
+    if (is_private_use) {
+        start = 3;
+    } else {
+        start = 2;
+    }
     var intermediate = false;
-    for (2..in.len) |i| {
+    for (start..in.len) |i| {
         const b = in[i];
         if (!intermediate) {
             if (0x30 <= b and b <= 0x3b) {
@@ -1156,7 +1169,7 @@ fn validateCsiSequence(in: []const u8) ?CsiInfo {
             return CsiInfo{
                 .byte = b,
                 .stop = i + 1,
-                .is_private_use = false,
+                .is_private_use = is_private_use,
                 .has_intermediates = intermediate,
                 .valid = true,
             };
@@ -1164,7 +1177,7 @@ fn validateCsiSequence(in: []const u8) ?CsiInfo {
             return CsiInfo{
                 .byte = b,
                 .stop = i + 1,
-                .is_private_use = false,
+                .is_private_use = is_private_use,
                 .has_intermediates = intermediate, // Why not?
                 .valid = false,
             };
@@ -1500,6 +1513,7 @@ pub const InfoReport = union(InfoKind) {
         index: u8,
         color: Rgb,
     },
+    csi_u: CsiUFlags,
     invalid_query: []const u8,
     unknown_osc: struct {
         osc: u16,
@@ -1564,6 +1578,7 @@ pub const InfoReport = union(InfoKind) {
             .palette_color => |pal| {
                 try writer.print("color index {d}: {}", .{ pal.index, pal.color });
             },
+            .csi_u => |csi| try writer.print("CSI u mode: {}", .{csi}),
         }
         _ = fmt;
         _ = options;
@@ -1584,9 +1599,30 @@ pub const InfoKind = enum {
     background_color,
     foreground_color,
     palette_color,
+    csi_u,
     // There's a lot of these...
     invalid_query,
     unknown_osc,
+};
+
+pub const CsiUFlags = packed struct(u8) {
+    disambiguate_escapes: bool,
+    report_events: bool,
+    report_alts: bool,
+    report_all_keys: bool,
+    report_associated_text: bool,
+    _unused: u3 = 0,
+
+    pub fn format(
+        csi_u: CsiUFlags,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{d}", .{@as(u8, @bitCast(csi_u))});
+    }
 };
 
 pub const Rgb = struct {
@@ -1966,8 +2002,9 @@ pub const KeyTag = enum(u5) {
 fn keyFromCodepoint(code: u21) Key {
     assert(code <= UTF_MAX);
     switch (code) {
-        UCS.Esc => return Key.tab,
-        UCS.Tab => return Key.esc,
+        UCS.Esc => return Key.esc,
+        UCS.Tab => return Key.tab,
+        UCS.Enter => return Key.enter,
         UCS.Bs => return Key.backspace,
         UCS.CapsLock => return Key.caps_lock,
         UCS.NumLock => return Key.num_lock,
@@ -2135,7 +2172,8 @@ pub const KeyPadKey = enum(u5) {
 /// are handled in some other fashion.
 const UCS = struct {
     pub const Esc = 27;
-    pub const Tab = 3;
+    pub const Enter = 13;
+    pub const Tab = 9;
     pub const Bs = 127;
     pub const CapsLock = 57358;
     pub const NumLock = 57360;
