@@ -42,7 +42,9 @@
 //! know that e.g. the
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
+const is_debug = builtin.mode == .Debug;
 const stringEscape = std.zig.stringEscape;
 
 const logger = std.log.scoped(.termread);
@@ -361,6 +363,41 @@ fn parseOsc(term: *TermRead, in: []const u8) Reply {
     assert(in[0] == '\x1b' and in[1] == ']');
     const maybe_info = validateOscSequence(in);
     if (maybe_info) |info| {
+        info: switch (info.osc) {
+            10, 11 => |c_osc| {
+                if (std.mem.eql(u8, in[info.val.start..][0..5], ";rgb:")) {
+                    const color_idx = info.val.start + 5;
+                    const color_slice = in[color_idx..info.val.end];
+                    const maybe_rgb = parseColorSequence(color_slice);
+                    if (maybe_rgb) |rgb| {
+                        if (c_osc == 10) {
+                            return infoReport(.{ .foreground_color = rgb }, info.stop, in);
+                        } else {
+                            return infoReport(.{ .background_color = rgb }, info.stop, in);
+                        }
+                    }
+                    break :info;
+                }
+            },
+            4 => {
+                const pal_idx, const delta = parseParameter(u8, in[info.val.start + 1 ..]) catch break :info;
+                const rgb_idx = info.val.start + 1 + delta;
+                if (std.mem.eql(u8, in[rgb_idx..][0..5], ";rgb:")) {
+                    const color_idx = rgb_idx + 5;
+                    const color_slice = in[color_idx..info.val.end];
+                    const maybe_rgb = parseColorSequence(color_slice);
+                    if (maybe_rgb) |rgb| {
+                        return infoReport(
+                            .{ .palette_color = .{ .index = pal_idx, .color = rgb } },
+                            info.stop,
+                            in,
+                        );
+                    }
+                    break :info;
+                }
+            },
+            else => {},
+        }
         return infoReport(
             .{ .unknown_osc = .{
                 .osc = info.osc,
@@ -931,16 +968,51 @@ fn parseText(term: *TermRead, in: []const u8) Reply {
     return Reply.ok(text(code), b, in);
 }
 
+fn parseColorSequence(seq: []const u8) ?Rgb {
+    logger.debug("color seq: {s}", .{seq});
+    var iter = std.mem.tokenizeScalar(u8, seq, '/');
+    var r_chan: u8 = undefined;
+    var g_chan: u8 = undefined;
+    var b_chan: u8 = undefined;
+    const r_maybe = iter.next();
+    if (r_maybe) |r| {
+        if (r.len < 4) return null;
+        // This is so insane lol
+        if (is_debug)
+            if (r[0] != r[2] or r[1] != r[3]) logger.warn("16 bit channels are real (lol) {s}", .{r});
+        r_chan, _ = parseHexParameter(u8, r[0..2]) catch return null;
+    }
+    const g_maybe = iter.next();
+    if (g_maybe) |g| {
+        if (g.len < 4) return null;
+        // This is so insane lol
+        if (is_debug)
+            if (g[0] != g[2] or g[1] != g[3]) logger.warn("16 bit channels are real (lol) {s}", .{g});
+        g_chan, _ = parseHexParameter(u8, g[0..2]) catch return null;
+    }
+    const b_maybe = iter.next();
+    if (b_maybe) |b| {
+        if (b.len < 4) return null;
+        // This is so insane lol
+        if (is_debug)
+            if (b[0] != b[2] or b[1] != b[3]) logger.warn("16 bit channels are real (lol) {s}", .{b});
+        b_chan, _ = parseHexParameter(u8, b[0..2]) catch return null;
+    }
+    // TODO: Maybe add alpha support some day
+    return Rgb{ .r = r_chan, .g = g_chan, .b = b_chan };
+}
+
 const ParameterError = error{
     BadParameter,
     ParameterTooBig,
+    NonNumericParameter,
 };
 
 // Parse a parameter into integer type T, returning the value and next index.
 fn parseParameter(T: type, seq: []const u8) ParameterError!struct { T, usize } {
     // TODO: Throw an error here
     var i: usize = 0;
-    while ('0' <= seq[i] and seq[i] <= '9') : (i += 1) {}
+    while (i < seq.len and '0' <= seq[i] and seq[i] <= '9') : (i += 1) {}
     if (i > 0) {
         const parsed_value: usize = std.fmt.parseInt(T, seq[0..i], 10) catch {
             return error.BadParameter;
@@ -951,9 +1023,28 @@ fn parseParameter(T: type, seq: []const u8) ParameterError!struct { T, usize } {
         } else {
             return error.ParameterTooBig;
         }
-    } else @panic("parseParameter called on non-numeric sequence");
+    } else return error.NonNumericParameter;
 }
 
+// Parse a hexadecimal parameter into integer type T, returning the value and next index.
+fn parseHexParameter(T: type, seq: []const u8) ParameterError!struct { T, usize } {
+    // TODO: Throw an error here
+    var i: usize = 0;
+    while (i < seq.len and std.ascii.isHex(seq[i])) : (i += 1) {}
+    if (i > 0) {
+        const parsed_value: usize = std.fmt.parseInt(T, seq[0..i], 16) catch {
+            return error.BadParameter;
+        };
+        if (parsed_value <= std.math.maxInt(T)) {
+            const value: T = @intCast(parsed_value);
+            return .{ value, i };
+        } else {
+            return error.ParameterTooBig;
+        }
+    } else return error.NonNumericParameter;
+}
+
+// TODO: Throw an error here
 const MouseReleaseStatus = enum {
     pressed,
     released,
@@ -1398,6 +1489,12 @@ pub const InfoReport = union(InfoKind) {
         style: CursorStyle,
         blinking: bool,
     },
+    background_color: Rgb,
+    foreground_color: Rgb,
+    palette_color: struct {
+        index: u8,
+        color: Rgb,
+    },
     invalid_query: []const u8,
     unknown_osc: struct {
         osc: u16,
@@ -1457,9 +1554,64 @@ pub const InfoReport = union(InfoKind) {
                     .{ un_osc.osc, seqprint(un_osc.payload) },
                 );
             },
+            .background_color => |bg| try writer.print("bg color: {}", .{bg}),
+            .foreground_color => |fg| try writer.print("fg color: {}", .{fg}),
+            .palette_color => |pal| {
+                try writer.print("color index {d}: {}", .{ pal.index, pal.color });
+            },
         }
         _ = fmt;
         _ = options;
+    }
+};
+
+/// Category of info reported.
+pub const InfoKind = enum {
+    unknown,
+    operating,
+    is_minimized,
+    cursor_position,
+    terminal_position,
+    cell_size_pixels,
+    terminal_size_cells,
+    terminal_size_pixels,
+    cursor_style,
+    background_color,
+    foreground_color,
+    palette_color,
+    // There's a lot of these...
+    invalid_query,
+    unknown_osc,
+};
+
+pub const Rgb = struct {
+    r: u8,
+    g: u8,
+    b: u8,
+
+    /// Return the relative luminance of the color from 0...255
+    pub fn luminance(rgb: Rgb) u8 {
+        // ref: https://www.w3.org/WAI/GL/wiki/Relative_luminance#Definition_as_Stated_in_WCAG_2.x
+        const r_f: f64 = @floatFromInt(rgb.r);
+        const g_f: f64 = @floatFromInt(rgb.g);
+        const b_f: f64 = @floatFromInt(rgb.b);
+        const lume_f = 0.2126 * r_f + 0.7152 * g_f + 0.0722 * b_f;
+        const lume_i: usize = @intFromFloat(@round(lume_f));
+        return @intCast(lume_i);
+    }
+
+    pub fn format(
+        rgb: Rgb,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print(
+            "#{x:0>2}{x:0>2}{x:0>2} luminance: {d}",
+            .{ rgb.r, rgb.g, rgb.b, rgb.luminance() },
+        );
     }
 };
 
@@ -1604,22 +1756,6 @@ pub const KeyReport = struct {
     pub fn justSuper(key: KeyReport) bool {
         return @as(u8, @bitCast(key.mod)) == @as(u8, @bitCast(onlySuper));
     }
-};
-
-/// Category of info reported.
-pub const InfoKind = enum {
-    unknown,
-    operating,
-    is_minimized,
-    cursor_position,
-    terminal_position,
-    cell_size_pixels,
-    terminal_size_cells,
-    terminal_size_pixels,
-    cursor_style,
-    // There's a lot of these...
-    invalid_query,
-    unknown_osc,
 };
 
 pub const CursorStyle = enum {
