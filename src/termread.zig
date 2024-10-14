@@ -43,6 +43,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const stringEscape = std.zig.stringEscape;
 
 const logger = std.log.scoped(.termread);
 
@@ -206,56 +207,62 @@ fn parseEscP(term: *TermRead, in: []const u8) Reply {
     assert(in[0] == '\x1b' and in[1] == 'P');
     const find_end = std.mem.indexOf(u8, in, "\x1b\\");
     if (find_end) |almost_end| {
-        const end = almost_end + 1;
-        switch (in[2]) {
-            '1' => {
-                if (in[3] == '$' and in[4] == 'r') {
-                    const style, const offset = parseParameter(u4, in[5..]) catch {
-                        return malformedRead(end, in);
-                    }; // TODO: we should verify 5 + offset == " q\x1b\\"
-                    _ = offset;
-                    var cursor_style: CursorStyle = undefined;
-                    var blinking = false;
-                    switch (style) {
-                        0 => cursor_style = .block,
-                        1 => {
-                            cursor_style = .block;
-                            blinking = true;
-                        },
-                        2 => cursor_style = .block,
-                        3 => {
-                            cursor_style = .underline;
-                            blinking = true;
-                        },
-                        4 => cursor_style = .underline,
-                        5 => {
-                            cursor_style = .bar;
-                            blinking = true;
-                        },
-                        6 => cursor_style = .bar,
-                        else => {
-                            return notRecognized(end, in);
-                        },
+        const end = almost_end + 2;
+        esc_p: {
+            switch (in[2]) {
+                '0' => {
+                    if (std.mem.eql(u8, in[3..end], "$r\x1b\\")) {
+                        return infoReport(.{ .invalid_query = "DECRQSS" }, end, in);
+                    } else {
+                        break :esc_p;
                     }
-                    return Reply{
-                        .status = .complete,
-                        .report = .{
-                            .info = .{
-                                .cursor_style = .{
-                                    .style = cursor_style,
-                                    .blinking = blinking,
+                },
+                '1' => {
+                    if (in[3] == '$' and in[4] == 'r') {
+                        const style, const offset = parseParameter(u4, in[5..]) catch {
+                            return malformedRead(end, in);
+                        }; // TODO: we should verify 5 + offset == " q\x1b\\"
+                        _ = offset;
+                        var cursor_style: CursorStyle = undefined;
+                        var blinking = false;
+                        switch (style) {
+                            0 => cursor_style = .block,
+                            1 => {
+                                cursor_style = .block;
+                                blinking = true;
+                            },
+                            2 => cursor_style = .block,
+                            3 => {
+                                cursor_style = .underline;
+                                blinking = true;
+                            },
+                            4 => cursor_style = .underline,
+                            5 => {
+                                cursor_style = .bar;
+                                blinking = true;
+                            },
+                            6 => cursor_style = .bar,
+                            else => break :esc_p,
+                        }
+                        return Reply{
+                            .status = .complete,
+                            .report = .{
+                                .info = .{
+                                    .cursor_style = .{
+                                        .style = cursor_style,
+                                        .blinking = blinking,
+                                    },
                                 },
                             },
-                        },
-                        .bytes = end,
-                        .buffer = in,
-                    };
-                } else {
-                    return notRecognized(end, in);
-                }
-            },
-            else => return notRecognized(end, in),
+                            .bytes = end,
+                            .buffer = in,
+                        };
+                    } else break :esc_p;
+                },
+                else => break :esc_p,
+            }
         }
+        return notRecognized(end, in);
     } else {
         return moreNeeded(false, in);
     }
@@ -1115,7 +1122,7 @@ fn function(num: u21) TermReport {
 fn infoReport(info: InfoReport, idx: usize, in: []const u8) Reply {
     return Reply{
         .status = .complete,
-        .report = info,
+        .report = .{ .info = info },
         .bytes = idx,
         .buffer = in,
     };
@@ -1276,9 +1283,9 @@ pub const TermReport = union(TermEventKind) {
             .associated_text => |at| {
                 try writer.print("associated text: {}", .{at});
             },
-            .unrecognized => {
+            .unrecognized => |unr| {
                 // TODO: escape-print sequences here, paste, malformed
-                try writer.print("unrecognized", .{});
+                try writer.print("unrecognized {}", .{unr});
             },
             .malformed => {
                 try writer.print("malformed", .{});
@@ -1320,6 +1327,7 @@ pub const InfoReport = union(InfoKind) {
         style: CursorStyle,
         blinking: bool,
     },
+    invalid_query: []const u8,
 
     pub fn format(
         info_report: InfoReport,
@@ -1367,6 +1375,7 @@ pub const InfoReport = union(InfoKind) {
                 const blink = if (c_style.blinking) "blinking " else "";
                 try writer.print("{s}{s} cursor", .{ blink, @tagName(c_style.style) });
             },
+            .invalid_query => |in_valid| try writer.print("invalid query: {s}", .{in_valid}),
         }
         _ = fmt;
         _ = options;
@@ -1385,6 +1394,16 @@ pub const MoreReport = struct {
 
 pub const UnrecognizedReport = struct {
     sequence: []const u8,
+
+    pub fn format(
+        unrecognized_report: UnrecognizedReport,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        try stringEscape(unrecognized_report.sequence, "", options, writer);
+    }
 };
 
 pub const MalformedReport = struct {
@@ -1518,6 +1537,7 @@ pub const InfoKind = enum {
     terminal_size_pixels,
     cursor_style,
     // There's a lot of these...
+    invalid_query,
 };
 
 pub const CursorStyle = enum {
