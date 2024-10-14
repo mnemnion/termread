@@ -88,7 +88,12 @@ pub const Quirks = packed struct(u8) {
 /// Scoped to `.termread`
 pub fn debugRead(term: *TermRead, in: []const u8) Reply {
     const reply = term.read(in);
-    logger.debug("status: {s}, {d} bytes\n{}", .{ @tagName(reply.status), reply.bytes, reply.report });
+    logger.debug("status: {s}, {d} bytes, sequence: {}\n{}", .{
+        @tagName(reply.status),
+        reply.bytes,
+        seqprint(in[0..reply.bytes]),
+        reply.report,
+    });
     return reply;
 }
 
