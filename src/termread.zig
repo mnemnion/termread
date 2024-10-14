@@ -90,6 +90,27 @@ pub fn debugRead(term: *TermRead, in: []const u8) Reply {
     return reply;
 }
 
+/// Sequence-printing struct
+pub const SeqPrint = struct {
+    str: []const u8,
+
+    pub fn format(
+        sequence: SeqPrint,
+        fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        try writer.writeByte('"');
+        try stringEscape(sequence.str, "", options, writer);
+        try writer.writeByte('"');
+    }
+};
+
+pub fn seqprint(str: []const u8) SeqPrint {
+    return .{ .str = str };
+}
+
 /// Read one sequence from `in` buffer.  Returns a `Reply`, containing
 /// the status of the read, the report, and the remainder of the in
 /// buffer.
@@ -144,7 +165,7 @@ fn parseEsc(term: *TermRead, in: []const u8) Reply {
     switch (in[1]) {
         'O' => return term.parseSs3(in),
         '[' => return term.parseCsi(in),
-        ']' => {}, // OSC
+        ']' => return term.parseOsc(in),
         0x1b => { // Legacy Alt-Esc
             return Reply.ok(modKey(mod().Alt(), specialKey(.esc)), 2, in);
         },
@@ -175,8 +196,8 @@ fn parseEsc(term: *TermRead, in: []const u8) Reply {
                 }
             }
         },
-    }
-    unreachable;
+    } // XXX: at least get all the switches in place here
+    return notRecognized(in.len, in);
 }
 
 fn parseSs3(term: *TermRead, in: []const u8) Reply {
@@ -269,7 +290,7 @@ fn parseEscP(term: *TermRead, in: []const u8) Reply {
 }
 
 fn parseCsi(term: *TermRead, in: []const u8) Reply {
-    const maybe_info = validateControlSequence(in);
+    const maybe_info = validateCsiSequence(in);
     if (maybe_info == null) {
         return moreNeeded(false, in);
     } // That checked, we can do this:
@@ -333,6 +354,24 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     }
     // Many options due to reporting of various sorts, TBD
     return notRecognized(info.stop, rest);
+}
+
+fn parseOsc(term: *TermRead, in: []const u8) Reply {
+    _ = term;
+    assert(in[0] == '\x1b' and in[1] == ']');
+    const maybe_info = validateOscSequence(in);
+    if (maybe_info) |info| {
+        return infoReport(
+            .{ .unknown_osc = .{
+                .osc = info.osc,
+                .payload = in[info.val.start..info.val.end],
+            } },
+            info.stop,
+            in,
+        );
+    } else {
+        return moreNeeded(false, in);
+    }
 }
 
 const UTF_MAX = 0x10ffff;
@@ -994,7 +1033,7 @@ const CsiInfo = struct {
 /// Verify the integrity of the CSI control sequence, returning
 /// a `CsiInfo` containing the parsing results.
 /// References are to ECMA-48/1991.
-fn validateControlSequence(in: []const u8) ?CsiInfo {
+fn validateCsiSequence(in: []const u8) ?CsiInfo {
     // §5.4.1b
     const is_private_use = '<' <= in[2] and in[2] <= '?';
     if (is_private_use) return CsiInfo{
@@ -1034,6 +1073,38 @@ fn validateControlSequence(in: []const u8) ?CsiInfo {
                 .valid = false,
             };
         }
+    }
+    return null;
+}
+
+pub const OscInfo = struct {
+    stop: usize,
+    val: struct {
+        start: usize,
+        end: usize,
+    },
+    osc: u16,
+};
+
+fn validateOscSequence(in: []const u8) ?OscInfo {
+    const osc_num, const delta = parseParameter(u16, in[2..]) catch return null;
+    // try esc-\ first
+    const v_start = 2 + delta;
+    const st_idx = std.mem.indexOfPos(u8, in, v_start, "\x1b\\");
+    if (st_idx) |idx| {
+        return OscInfo{
+            .stop = idx + 2,
+            .val = .{ .start = v_start, .end = idx },
+            .osc = osc_num,
+        };
+    }
+    const bel_idx = std.mem.indexOfScalarPos(u8, in, v_start, 0x7);
+    if (bel_idx) |bel| {
+        return OscInfo{
+            .stop = bel + 1,
+            .val = .{ .start = v_start, .end = bel },
+            .osc = osc_num,
+        };
     }
     return null;
 }
@@ -1328,6 +1399,10 @@ pub const InfoReport = union(InfoKind) {
         blinking: bool,
     },
     invalid_query: []const u8,
+    unknown_osc: struct {
+        osc: u16,
+        payload: []const u8,
+    },
 
     pub fn format(
         info_report: InfoReport,
@@ -1376,6 +1451,12 @@ pub const InfoReport = union(InfoKind) {
                 try writer.print("{s}{s} cursor", .{ blink, @tagName(c_style.style) });
             },
             .invalid_query => |in_valid| try writer.print("invalid query: {s}", .{in_valid}),
+            .unknown_osc => |un_osc| {
+                try writer.print(
+                    "osc {d} (unknown) returned: {}",
+                    .{ un_osc.osc, seqprint(un_osc.payload) },
+                );
+            },
         }
         _ = fmt;
         _ = options;
@@ -1538,6 +1619,7 @@ pub const InfoKind = enum {
     cursor_style,
     // There's a lot of these...
     invalid_query,
+    unknown_osc,
 };
 
 pub const CursorStyle = enum {
