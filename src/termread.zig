@@ -305,7 +305,6 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     if (!info.valid) {
         return malformedRead(info.stop, in);
     }
-    const rest = in[info.stop..];
     const b = info.byte;
     if (info.is_private_use) {
         assert('<' <= in[2] and in[2] <= '?');
@@ -320,7 +319,7 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
     // Csi-u?
     if (b == 'u') {
         if (!info.has_intermediates)
-            return term.parseCsiU(info, in, in[2..info.stop], rest)
+            return term.parseCsiU(info, in, in[2..info.stop])
         else // Arguably unrecognized (private use and all),
             //  but not for our purposes
             return malformedRead(info.stop, in);
@@ -350,17 +349,21 @@ fn parseCsi(term: *TermRead, in: []const u8) Reply {
         'Z' => {
             // Support fixterms Ctrl-Shift-Tab
             if (std.mem.eql(u8, in[2..6], "1;5")) {
-                return Reply.ok(modKey(mod().Shift().Control(), specialKey(.tab)), info.stop, rest);
+                return Reply.ok(
+                    modKey(mod().Shift().Control(), specialKey(.tab)),
+                    info.stop,
+                    in,
+                );
             } else { // There are some sequences here, probably not worth recognizing
                 return notRecognized(info.stop, in);
             }
         },
         'R' => return term.parseCursorInfo(info, in),
-        't' => {}, // Terminal Reports
+        't' => return term.parseTerminalInfo(info, in),
         else => return notRecognized(info.stop, in),
     }
     // Many options due to reporting of various sorts, TBD
-    return notRecognized(info.stop, rest);
+    return notRecognized(info.stop, in);
 }
 
 fn parseOsc(term: *TermRead, in: []const u8) Reply {
@@ -418,7 +421,7 @@ fn parseOsc(term: *TermRead, in: []const u8) Reply {
 
 const UTF_MAX = 0x10ffff;
 
-fn parseCsiU(term: *TermRead, info: CsiInfo, in: []const u8, seq: []const u8, rest: []const u8) Reply {
+fn parseCsiU(term: *TermRead, info: CsiInfo, in: []const u8, seq: []const u8) Reply {
     // Preconditions
     assert(in[0] == '\x1b');
     assert(in[1] == '[');
@@ -436,7 +439,7 @@ fn parseCsiU(term: *TermRead, info: CsiInfo, in: []const u8, seq: []const u8, re
     }
     if (idx == seq.len - 1) {
         // Easy
-        return Reply.ok(text(codepoint), idx, rest);
+        return Reply.ok(text(codepoint), idx, in);
     }
     const key_val = keyFromCodepoint(codepoint);
     // Obtain shifted key, if available.
@@ -920,7 +923,7 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
             idx += idx_delta;
             if (in[idx] != ';') return malformedRead(idx, in);
             idx += 1;
-            const width, idx_delta = parseParameter(u16, idx + 1) catch {
+            const width, idx_delta = parseParameter(u16, in[idx..]) catch {
                 return malformedRead(idx, in);
             };
             idx += idx_delta;
@@ -952,24 +955,19 @@ fn parseTerminalInfo(term: *TermRead, info: CsiInfo, in: []const u8) Reply {
                 },
                 '8' => InfoReport{
                     .terminal_size_cells = .{
-                        .height = height,
-                        .width = width,
+                        .cols = height,
+                        .rows = width,
                     },
                 },
                 '9' => InfoReport{
                     .screen_size_cells = .{
-                        .height = height,
-                        .width = width,
+                        .cols = height,
+                        .rows = width,
                     },
                 },
                 else => unreachable,
             };
-            return Reply{
-                .status = .complete,
-                .report = i_report,
-                .bytes = info.stop,
-                .buffer = in,
-            };
+            return infoReport(i_report, info.stop, in);
         },
         else => return notRecognized(info.stop, in),
     }
@@ -1496,12 +1494,20 @@ pub const InfoReport = union(InfoKind) {
         width: u16,
     },
     terminal_size_cells: struct {
-        rows: u16,
         cols: u16,
+        rows: u16,
     },
     terminal_size_pixels: struct {
         height: u16,
         width: u16,
+    },
+    screen_size_pixels: struct {
+        height: u16,
+        width: u16,
+    },
+    screen_size_cells: struct {
+        cols: u16,
+        rows: u16,
     },
     cursor_style: struct {
         style: CursorStyle,
@@ -1562,6 +1568,18 @@ pub const InfoReport = union(InfoKind) {
                     .{ term_pix.height, term_pix.width },
                 );
             },
+            .screen_size_pixels => |screen_pix| {
+                try writer.print(
+                    "screen size in pixels: height {d}, width {d}",
+                    .{ screen_pix.height, screen_pix.width },
+                );
+            },
+            .screen_size_cells => |screen_cell| {
+                try writer.print(
+                    "screen size in cells: {d} rows, {d} columns",
+                    .{ screen_cell.rows, screen_cell.cols },
+                );
+            },
             .cursor_style => |c_style| {
                 const blink = if (c_style.blinking) "blinking " else "";
                 try writer.print("{s}{s} cursor", .{ blink, @tagName(c_style.style) });
@@ -1595,6 +1613,8 @@ pub const InfoKind = enum {
     cell_size_pixels,
     terminal_size_cells,
     terminal_size_pixels,
+    screen_size_pixels,
+    screen_size_cells,
     cursor_style,
     background_color,
     foreground_color,
